@@ -8,6 +8,8 @@ local INPUT_SUM_TABLE_NAME = "ocs_launching_calculator_input_sum_table"
 local OUTPUT_SUM_TABLE_NAME = "ocs_launching_calculator_output_sum_table"
 local RECOMMENDATION_NAME = "ocs_launching_calculator_recommendation"
 local WEIGHT_PER_KILOGRAM = 1000
+local WINDOW_WIDTH = 1100
+local COLUMN_WIDTH = 536
 -- Future rocket-ratio feature:
 -- local ROCKET_LIFT_WEIGHT = prototypes.utility_constants.default_rocket_lift_weight
 
@@ -32,7 +34,7 @@ local function fluid_barrel_details(fluid_name, fluid_amount)
   local barrel = prototypes.item[barrel_name]
   if not barrel then return nil end
 
-  local fill_recipe = prototypes.recipe["fill-" .. barrel_name]
+  local fill_recipe = prototypes.recipe[barrel_name]
   local fluid_per_batch, barrels_per_batch
   if fill_recipe then
     for _, ingredient in pairs(fill_recipe.ingredients) do
@@ -50,12 +52,13 @@ local function fluid_barrel_details(fluid_name, fluid_amount)
   end
 
   if not fluid_per_batch or fluid_per_batch <= 0 or not barrels_per_batch then
-    return { prototype = barrel, amount = 0, note = {"ocs-launching-calculator.no-fill-recipe"} }
+    return { prototype = barrel, amount = fluid_amount, note = { "ocs-launching-calculator.no-fill-recipe" } }
   end
+  local barrel_amount = fluid_amount * barrels_per_batch / fluid_per_batch
   return {
     prototype = barrel,
-    amount = fluid_amount * barrels_per_batch / fluid_per_batch,
-    note = {"ocs-launching-calculator.converted-from-fluid"}
+    amount = barrel_amount,
+    note = { "ocs-launching-calculator.converted-from-fluid" }
   }
 end
 
@@ -67,18 +70,25 @@ end
 -- ==============================================================================
 -- GUI Functions
 local function add_headers(gui_table)
-  for _, caption in ipairs({ "", {"ocs-launching-calculator.header-icon"}, {"ocs-launching-calculator.header-item"}, {"ocs-launching-calculator.header-amount"}, {"ocs-launching-calculator.header-unit-mass"}, {"ocs-launching-calculator.header-total-mass"} }) do
+  for _, caption in ipairs({ "", { "ocs-launching-calculator.header-icon" }, { "ocs-launching-calculator.header-item" }, { "ocs-launching-calculator.header-amount" }, { "ocs-launching-calculator.header-unit-mass" }, { "ocs-launching-calculator.header-total-mass" } }) do
     gui_table.add { type = "label", caption = caption, style = "caption_label" }
   end
   -- Future rocket-ratio column: {"ocs-launching-calculator.header-rocket-ratio"}
 end
 
 ---Updates a row's icon, label, quantities, and the mass used in its sum.
-local function set_row_display(gui_table, row_id, prototype, amount, unit_mass, note, sprite, decimals)
+local function set_row_display(gui_table, row_id, prototype, amount, unit_mass, note, is_fluid, decimals)
   local total_mass = amount * unit_mass
-  local rocket_ratio = ROCKET_LIFT_WEIGHT / total_mass
-  gui_table[row_id .. "_icon"].sprite = sprite
-  gui_table[row_id .. "_icon"].tooltip = note or prototype.localised_name
+  -- Future rocket-ratio calculation:
+  -- local rocket_ratio = total_mass / ROCKET_LIFT_WEIGHT
+  local icon_holder = gui_table[row_id .. "_icon_holder"]
+  icon_holder.clear()
+  icon_holder.add {
+    type = "sprite-button",
+    sprite = (is_fluid and "fluid/" or "item/") .. prototype.name,
+    style = "slot_button",
+    tooltip = note or prototype.localised_name
+  }
   gui_table[row_id .. "_name"].caption = prototype.localised_name
   gui_table[row_id .. "_name"].tooltip = note
   gui_table[row_id .. "_amount"].caption = display_number(amount, decimals)
@@ -94,7 +104,7 @@ end
 ---Creates the cells shared by item and fluid rows and returns their checkbox.
 local function add_row_cells(gui_table, row_id, checkbox_spec)
   local checkbox = gui_table.add(checkbox_spec)
-  gui_table.add { type = "sprite-button", name = row_id .. "_icon", sprite = "utility/questionmark", style = "slot_button" }
+  gui_table.add { type = "flow", name = row_id .. "_icon_holder", direction = "horizontal" }
   gui_table.add { type = "label", name = row_id .. "_name" }
   gui_table.add { type = "label", name = row_id .. "_amount" }
   gui_table.add { type = "label", name = row_id .. "_unit_mass" }
@@ -109,11 +119,13 @@ local function add_item_row(gui_table, side, index, entry, amount, decimals)
     local prototype = prototypes.item[entry.name]
     local unit_mass = prototype and prototype.weight / WEIGHT_PER_KILOGRAM or 0
     add_row_cells(gui_table, row_id, {
-      type = "checkbox", name = row_id .. "_include", state = true,
-      tooltip = {"ocs-launching-calculator.include-row"},
+      type = "checkbox",
+      name = row_id .. "_include",
+      state = true,
+      tooltip = { "ocs-launching-calculator.include-row" },
       tags = { row_type = "item", total_mass = amount * unit_mass }
     })
-    set_row_display(gui_table, row_id, prototype, amount, unit_mass, nil, prototype and "item/" .. prototype.name or "utility/questionmark", decimals)
+    set_row_display(gui_table, row_id, prototype, amount, unit_mass, nil, false, decimals)
     return
   end
 
@@ -121,24 +133,33 @@ local function add_item_row(gui_table, side, index, entry, amount, decimals)
   local barrel = fluid_barrel_details(entry.name, amount)
   if not barrel then
     add_row_cells(gui_table, row_id, {
-      type = "checkbox", name = row_id .. "_include", state = false, enabled = false,
-      tooltip = {"ocs-launching-calculator.no-barrel-tooltip"},
+      type = "checkbox",
+      name = row_id .. "_include",
+      state = false,
+      enabled = false,
+      tooltip = { "ocs-launching-calculator.no-barrel-tooltip" },
       tags = { row_type = "unbarrelled-fluid", total_mass = 0 }
     })
-    set_row_display(gui_table, row_id, fluid, amount, 0, {"ocs-launching-calculator.no-barrel-note"}, "fluid/" .. entry.name, decimals)
+    set_row_display(gui_table, row_id, fluid, amount, 0, { "ocs-launching-calculator.no-barrel-note" }, true, decimals)
     return
   end
 
   add_row_cells(gui_table, row_id, {
-    type = "checkbox", name = row_id .. "_include", state = true,
-    tooltip = {"ocs-launching-calculator.toggle-barrel"},
+    type = "checkbox",
+    name = row_id .. "_include",
+    state = true,
+    tooltip = { "ocs-launching-calculator.toggle-barrel" },
     tags = {
-      row_type = "barrelled-fluid", fluid_name = entry.name, fluid_amount = amount,
-      barrel_name = barrel.prototype.name, barrel_amount = barrel.amount, total_mass = 0
+      row_type = "barrelled-fluid",
+      fluid_name = entry.name,
+      fluid_amount = amount,
+      barrel_name = barrel.prototype.name,
+      barrel_amount = barrel.amount,
+      total_mass = 0
     }
   })
   set_row_display(gui_table, row_id, barrel.prototype, barrel.amount,
-    barrel.prototype.weight / WEIGHT_PER_KILOGRAM, {"ocs-launching-calculator.converted-from-fluid"}, "item/" .. barrel.prototype.name, decimals)
+    barrel.prototype.weight / WEIGHT_PER_KILOGRAM, { "ocs-launching-calculator.converted-from-fluid" }, false, decimals)
 end
 
 ---Switches a barrel-capable fluid row between its fluid and barrel displays.
@@ -149,23 +170,29 @@ local function update_fluid_row(checkbox, decimals)
   if checkbox.state then
     local barrel = prototypes.item[tags.barrel_name]
     set_row_display(gui_table, row_id, barrel, tags.barrel_amount,
-      barrel.weight / WEIGHT_PER_KILOGRAM, {"ocs-launching-calculator.converted-from-fluid"}, "item/" .. barrel.name, decimals)
+      barrel.weight / WEIGHT_PER_KILOGRAM, { "ocs-launching-calculator.converted-from-fluid" }, false, decimals)
   else
     local fluid = prototypes.fluid[tags.fluid_name]
     set_row_display(gui_table, row_id, fluid, tags.fluid_amount, 0,
-      {"ocs-launching-calculator.fluid-direct-note"}, "fluid/" .. fluid.name, decimals)
+      { "ocs-launching-calculator.fluid-direct-note" }, true, decimals)
   end
 end
 
 local function add_sum_row(gui_table, side, total, decimals)
   gui_table.add { type = "label", caption = "" }
   gui_table.add { type = "label", caption = "Σ", style = "caption_label" }
-  gui_table.add { type = "label", caption = {"ocs-launching-calculator.sum"}, style = "caption_label" }
+  gui_table.add {
+    type = "label",
+    caption = { side == "input" and "ocs-launching-calculator.sum-inputs" or "ocs-launching-calculator.sum-outputs" },
+    style = "caption_label"
+  }
   gui_table.add { type = "label", caption = "" }
   gui_table.add { type = "label", caption = "" }
   gui_table.add {
-    type = "label", name = "ocs_launching_calculator_" .. side .. "_mass_sum",
-    caption = display_number(total, decimals), style = "caption_label"
+    type = "label",
+    name = "ocs_launching_calculator_" .. side .. "_mass_sum",
+    caption = display_number(total, decimals),
+    style = "caption_label"
   }
   -- Future rocket-ratio sum cell:
   -- gui_table.add { type = "label", caption = display_number(total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals) }
@@ -243,11 +270,11 @@ local function recalculate(player)
   local recommendation = frame[RECOMMENDATION_NAME]
   if not (recommendation and recommendation.valid) then return end
   if input_total < output_total then
-    recommendation.caption = {"ocs-launching-calculator.recommend-inputs"}
+    recommendation.caption = { "ocs-launching-calculator.recommend-inputs" }
   elseif output_total < input_total then
-    recommendation.caption = {"ocs-launching-calculator.recommend-outputs"}
+    recommendation.caption = { "ocs-launching-calculator.recommend-outputs" }
   else
-    recommendation.caption = {"ocs-launching-calculator.recommend-equal"}
+    recommendation.caption = { "ocs-launching-calculator.recommend-equal" }
   end
 end
 
@@ -266,7 +293,7 @@ local function clear_recipe_tables(player)
     sum_table.clear()
     add_sum_row(sum_table, side, 0, decimals)
   end
-  frame[RECOMMENDATION_NAME].caption = {"ocs-launching-calculator.select-recipe"}
+  frame[RECOMMENDATION_NAME].caption = { "ocs-launching-calculator.select-recipe" }
 end
 
 local function show_recipe(player, recipe_name)
@@ -275,7 +302,8 @@ local function show_recipe(player, recipe_name)
 
   local recipe = recipe_name and prototypes.recipe[recipe_name]
   if not recipe then
-    frame["ocs_launching_calculator_selection"].ocs_launching_calculator_recipe_name.caption = {"ocs-launching-calculator.no-recipe"}
+    frame["ocs_launching_calculator_selection"].ocs_launching_calculator_recipe_name.caption = {
+      "ocs-launching-calculator.no-recipe" }
     clear_recipe_tables(player)
     return
   end
@@ -313,14 +341,22 @@ local function create_calculator(player)
   if old_frame then old_frame.destroy() end
   local frame = player.gui.screen.add { type = "frame", name = FRAME_NAME, direction = "vertical" }
   frame.auto_center = true
+  frame.style.width = WINDOW_WIDTH
 
-  local titlebar = frame.add { type = "frame", direction = "horizontal", style = "inside_shallow_frame_with_padding" }
+  local titlebar = frame.add { type = "flow", direction = "horizontal" }
   titlebar.drag_target = frame
-  titlebar.add { type = "label", caption = {"ocs-launching-calculator.title"}, style = "frame_title" }
+  titlebar.style.horizontally_stretchable = true
+  titlebar.add { type = "label", caption = { "ocs-launching-calculator.title" }, style = "frame_title" }
   local filler = titlebar.add { type = "empty-widget", style = "draggable_space_header" }
   filler.style.horizontally_stretchable = true
   filler.drag_target = frame
-  titlebar.add { type = "sprite-button", name = "ocs_launching_calculator_close", sprite = "utility/close", style = "frame_action_button", tooltip = {"ocs-launching-calculator.close"} }
+  titlebar.add {
+    type = "sprite-button",
+    name = "ocs_launching_calculator_close",
+    sprite = "utility/close",
+    style = "frame_action_button",
+    tooltip = { "ocs-launching-calculator.close" }
+  }
 
   local selection = frame.add {
     type = "frame",
@@ -328,9 +364,9 @@ local function create_calculator(player)
     direction = "horizontal",
     style = "inside_shallow_frame_with_padding"
   }
-  selection.add { type = "label", caption = {"ocs-launching-calculator.recipe"} }
+  selection.add { type = "label", caption = { "ocs-launching-calculator.recipe" } }
   selection.add { type = "choose-elem-button", name = RECIPE_PICKER_NAME, elem_type = "recipe" }
-  selection.add { type = "label", name = "ocs_launching_calculator_recipe_name", caption = {"ocs-launching-calculator.no-recipe"} }
+  selection.add { type = "label", name = "ocs_launching_calculator_recipe_name", caption = { "ocs-launching-calculator.no-recipe" } }
 
   local body = frame.add {
     type = "flow",
@@ -343,7 +379,8 @@ local function create_calculator(player)
     direction = "vertical",
     style = "inside_shallow_frame_with_padding"
   }
-  input_column.add { type = "label", caption = {"ocs-launching-calculator.inputs"}, style = "heading_2_label" }
+  input_column.add { type = "label", caption = { "ocs-launching-calculator.inputs" }, style = "heading_2_label" }
+  input_column.style.width = COLUMN_WIDTH
   input_column.add { type = "table", name = INPUT_TABLE_NAME, column_count = 6 }
   local output_column = body.add {
     type = "frame",
@@ -351,7 +388,8 @@ local function create_calculator(player)
     direction = "vertical",
     style = "inside_shallow_frame_with_padding"
   }
-  output_column.add { type = "label", caption = {"ocs-launching-calculator.outputs"}, style = "heading_2_label" }
+  output_column.add { type = "label", caption = { "ocs-launching-calculator.outputs" }, style = "heading_2_label" }
+  output_column.style.width = COLUMN_WIDTH
   output_column.add { type = "table", name = OUTPUT_TABLE_NAME, column_count = 6 }
   local sums_flow = frame.add {
     type = "frame", name = "ocs_launching_calculator_sums", direction = "horizontal",
@@ -359,7 +397,9 @@ local function create_calculator(player)
   }
   sums_flow.add { type = "table", name = INPUT_SUM_TABLE_NAME, column_count = 6 }
   sums_flow.add { type = "table", name = OUTPUT_SUM_TABLE_NAME, column_count = 6 }
-  frame.add { type = "label", name = RECOMMENDATION_NAME, caption = {"ocs-launching-calculator.select-recipe"}, style = "heading_2_label" }
+  sums_flow[INPUT_SUM_TABLE_NAME].style.width = COLUMN_WIDTH
+  sums_flow[OUTPUT_SUM_TABLE_NAME].style.width = COLUMN_WIDTH
+  frame.add { type = "label", name = RECOMMENDATION_NAME, caption = { "ocs-launching-calculator.select-recipe" }, style = "heading_2_label" }
   clear_recipe_tables(player)
 end
 
@@ -368,12 +408,13 @@ local function create_main_button(player)
   if flow.ocs_launching_calculator_button then return end
   flow.add {
     type = "sprite-button", name = "ocs_launching_calculator_button", sprite = "item/rocket-part",
-    tooltip = {"ocs-launching-calculator.title"}, style = mod_gui.button_style
+    tooltip = { "ocs-launching-calculator.title" }, style = mod_gui.button_style
   }
 end
 
 -- ==============================================================================
 -- Scripts
+
 script.on_init(function()
   for _, player in pairs(game.players) do create_main_button(player) end
 end)
