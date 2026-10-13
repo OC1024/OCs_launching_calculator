@@ -3,4 +3,5 @@ Version: 0.1.0
 Date: 2025-11-02
   Major Features:
     - Initial release of the launching calculator mod.
+  Translation:
     - English and German localisation.

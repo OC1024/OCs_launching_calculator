@@ -5,7 +5,7 @@ data:extend({
         setting_type = "runtime-per-user",
         order = "a",
         default_value = 2,
-        minimum_value = 1,
+        minimum_value = 0,
         maximum_value = 9,
     },
 })

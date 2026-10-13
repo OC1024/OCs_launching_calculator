@@ -5,10 +5,10 @@
     "author": "OC1024",
     "space_travel_required": true,
     "description": "This mot shall calculate if it is cheaper launch educts or products of a chosen recipe.",
-    "factorio_version": "2.0",
+    "factorio_version": "2.1",
     "dependencies": [
-      "base >= 2.0",
+      "base >= 2.1",
       "space-age",
-      "(?) OCs_base_assets >= 0.3.0"
+      "(?) OCs_base_assets >= 0.6.0"
     ]
   }
