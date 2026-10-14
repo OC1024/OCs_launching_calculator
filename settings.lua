@@ -6,6 +6,6 @@ data:extend({
         order = "a",
         default_value = 2,
         minimum_value = 0,
-        maximum_value = 9,
+        maximum_value = 5,
     },
 })

@@ -1,6 +1,6 @@
 ---------------------------------------------------------------------------------------------------
 Version: 0.1.0
-Date: 2025-11-02
+Date: 2026-10-13
   Major Features:
     - Initial release of the launching calculator mod.
   Translation:

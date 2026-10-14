@@ -7,11 +7,13 @@ local OUTPUT_TABLE_NAME = "ocs_launching_calculator_outputs"
 local INPUT_SUM_TABLE_NAME = "ocs_launching_calculator_input_sum_table"
 local OUTPUT_SUM_TABLE_NAME = "ocs_launching_calculator_output_sum_table"
 local RECOMMENDATION_NAME = "ocs_launching_calculator_recommendation"
-local WEIGHT_PER_KILOGRAM = 1000
+local WEIGHT_PER_KILOGRAM = 1000 -- mass is in grams
+local WEIGHT_PER_TON = 1e6       -- mass is in grams
 local WINDOW_WIDTH = 1100
 local COLUMN_WIDTH = 536
 -- Future rocket-ratio feature:
--- local ROCKET_LIFT_WEIGHT = prototypes.utility_constants.default_rocket_lift_weight
+local ROCKET_LIFT_WEIGHT = prototypes.utility_constants.default_rocket_lift_weight
+local rocket_capacity = ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
 
 -- ==============================================================================
 -- Helper Functions
@@ -21,9 +23,9 @@ local function display_number(value, decimals)
   return string.format("%." .. decimals .. "f", value)
 end
 
+-- per player value, so not gobal/local variable
 local function player_decimals(player)
-  local setting = settings.get_player_settings(player)["round_decimals"]
-  return setting and setting.value or 2
+  return settings.get_player_settings(player)["round_decimals"].value or 2
 end
 
 ---A barrel normally has a matching fill recipe. This supports modded barrel
@@ -62,16 +64,80 @@ local function fluid_barrel_details(fluid_name, fluid_amount)
   }
 end
 
----Returns Factorio's own expected amount, including product probability/ranges.
-local function expected_product_amount(recipe, product_index)
-  return recipe.get_product_amount(product_index)
+---Returns the total quantity of included items, including barrels but excluding unbarrelled fluids.
+local function included_amount_total(gui_table)
+  local total = 0
+  for _, element in pairs(gui_table.children) do
+    if element.type == "checkbox" and element.valid and element.state then
+      local tags = element.tags
+      if tags.row_type == "item" then
+        total = total + (tags.amount or 0)
+      elseif tags.row_type == "barrelled-fluid" then
+        total = total + (tags.barrel_amount or 0)
+      end
+    end
+  end
+  return total
+end
+
+
+---Returns the best recipe for a clicked item or fluid.
+---Prefers an exact recipe-name match, otherwise requires a unique match.
+local function find_unique_recipe_for_product(item_name, item_type)
+  local unique_recipe = nil
+  for _, recipe in pairs(prototypes.recipe) do
+    -- Exclude recycling recipes.
+    local function is_recycling_recipe(recipe)
+      for _, category in pairs(recipe.categories) do
+        if category == "recycling" then return true end
+      end
+      return false
+    end
+    if not is_recycling_recipe(recipe) then
+      for _, product in ipairs(recipe.products) do
+        local product_type = product.type or "item"
+
+        if product.name == item_name and product_type == item_type then
+          -- Prefer a recipe whose name matches the product.
+          if recipe.name == item_name then
+            return recipe
+          end
+          -- Otherwise, track whether the match is unique.
+          if unique_recipe then
+            unique_recipe = false
+            break
+          end
+          unique_recipe = recipe
+          break
+        end
+      end
+    end
+  end
+
+  return unique_recipe or nil
 end
 
 -- ==============================================================================
 -- GUI Functions
+
+---Input/Output tables
 local function add_headers(gui_table)
-  for _, caption in ipairs({ "", { "ocs-launching-calculator.header-icon" }, { "ocs-launching-calculator.header-item" }, { "ocs-launching-calculator.header-amount" }, { "ocs-launching-calculator.header-unit-mass" }, { "ocs-launching-calculator.header-total-mass" } }) do
-    gui_table.add { type = "label", caption = caption, style = "caption_label" }
+  for _, header in ipairs({
+    { caption = "" }, -- checkbox
+    { caption = { "ocs-launching-calculator.header-icon" } },
+    { caption = { "ocs-launching-calculator.header-item" } },
+    { caption = "#",                                       tooltip = { "ocs-launching-calculator.header-amount" } },
+    { caption = "m [kg]",                                  tooltip = { "ocs-launching-calculator.header-unit-mass" } },
+    { caption = "# × m [kg]",                              tooltip = { "ocs-launching-calculator.header-total-mass" } }, -- "# · m" "# × m"
+    { caption = "[img=item/rocket-part]",                  tooltip = { "ocs-launching-calculator.header-rocket-ratio" } },
+    { caption = "" },                                                                                                    -- warnings
+  }) do
+    gui_table.add {
+      type = "label",
+      caption = header.caption,
+      tooltip = header.tooltip,
+      style = "caption_label",
+    }
   end
   -- Future rocket-ratio column: {"ocs-launching-calculator.header-rocket-ratio"}
 end
@@ -79,23 +145,39 @@ end
 ---Updates a row's icon, label, quantities, and the mass used in its sum.
 local function set_row_display(gui_table, row_id, prototype, amount, unit_mass, note, is_fluid, decimals)
   local total_mass = amount * unit_mass
-  -- Future rocket-ratio calculation:
-  -- local rocket_ratio = total_mass / ROCKET_LIFT_WEIGHT
+  local rocket_ratio = total_mass / rocket_capacity
+  local exceeds_capacity = not is_fluid and unit_mass > rocket_capacity
+
+  -- Item icon and name
   local icon_holder = gui_table[row_id .. "_icon_holder"]
   icon_holder.clear()
   icon_holder.add {
     type = "sprite-button",
     sprite = (is_fluid and "fluid/" or "item/") .. prototype.name,
     style = "slot_button",
-    tooltip = note or prototype.localised_name
+    tooltip = { "", note or prototype.localised_name, "\n", { "ocs-launching-calculator.click-to-select-recipe" } },
+    tags = {
+      action = "select-recipe-for-product",
+      item_name = prototype.name,
+      item_type = is_fluid and "fluid" or "item"
+    },
   }
   gui_table[row_id .. "_name"].caption = prototype.localised_name
   gui_table[row_id .. "_name"].tooltip = note
+
+  -- Quantity and mass values
   gui_table[row_id .. "_amount"].caption = display_number(amount, decimals)
   gui_table[row_id .. "_unit_mass"].caption = display_number(unit_mass, decimals)
+  gui_table[row_id .. "_unit_mass"].style = exceeds_capacity and "bold_red_label" or "label"
   gui_table[row_id .. "_total_mass"].caption = display_number(total_mass, decimals)
-  -- gui_table[row_id .. "_rocket_ratio"].caption = display_number(rocket_ratio, decimals)
+  gui_table[row_id .. "_rocket_ratio"].caption = display_number(rocket_ratio, decimals)
 
+  -- Launchability warning
+  gui_table[row_id .. "_warning"].caption = exceeds_capacity and "[img=utility/warning_icon]" or ""
+  gui_table[row_id .. "_warning"].tooltip = exceeds_capacity and
+      { "ocs-launching-calculator.unit-mass-exceeds-rocket-capacity" } or nil
+
+  -- Update mass used by aggregate calculations
   local tags = gui_table[row_id .. "_include"].tags
   tags.total_mass = total_mass
   gui_table[row_id .. "_include"].tags = tags
@@ -109,6 +191,8 @@ local function add_row_cells(gui_table, row_id, checkbox_spec)
   gui_table.add { type = "label", name = row_id .. "_amount" }
   gui_table.add { type = "label", name = row_id .. "_unit_mass" }
   gui_table.add { type = "label", name = row_id .. "_total_mass" }
+  gui_table.add { type = "label", name = row_id .. "_rocket_ratio" }
+  gui_table.add { type = "label", name = row_id .. "_warning" }
   return checkbox
 end
 
@@ -123,12 +207,13 @@ local function add_item_row(gui_table, side, index, entry, amount, decimals)
       name = row_id .. "_include",
       state = true,
       tooltip = { "ocs-launching-calculator.include-row" },
-      tags = { row_type = "item", total_mass = amount * unit_mass }
+      tags = { row_type = "item", amount = amount, total_mass = amount * unit_mass }
     })
     set_row_display(gui_table, row_id, prototype, amount, unit_mass, nil, false, decimals)
     return
   end
 
+  -- if barreled
   local fluid = prototypes.fluid[entry.name]
   local barrel = fluid_barrel_details(entry.name, amount)
   if not barrel then
@@ -144,6 +229,7 @@ local function add_item_row(gui_table, side, index, entry, amount, decimals)
     return
   end
 
+  -- if fluid
   add_row_cells(gui_table, row_id, {
     type = "checkbox",
     name = row_id .. "_include",
@@ -178,24 +264,79 @@ local function update_fluid_row(checkbox, decimals)
   end
 end
 
-local function add_sum_row(gui_table, side, total, decimals)
-  gui_table.add { type = "label", caption = "" }
-  gui_table.add { type = "label", caption = "Σ", style = "caption_label" }
+local function add_sum_row(gui_table, side, amount_total, total, decimals)
+  local type_caption = {
+    side == "input"
+    and "ocs-launching-calculator.sum-inputs"
+    or "ocs-launching-calculator.sum-outputs"
+  }
+
+  -- Header row
   gui_table.add {
     type = "label",
-    caption = { side == "input" and "ocs-launching-calculator.sum-inputs" or "ocs-launching-calculator.sum-outputs" },
-    style = "caption_label"
+    caption = { "ocs-launching-calculator.header-type" },
+    style = "caption_label",
   }
-  gui_table.add { type = "label", caption = "" }
-  gui_table.add { type = "label", caption = "" }
+  gui_table.add {
+    type = "label",
+    caption = "",
+  }
+  gui_table.add {
+    type = "label",
+    caption = "Σ #",
+    tooltip = { "ocs-launching-calculator.header-sum-amount" },
+    style = "caption_label",
+  }
+  gui_table.add {
+    type = "label",
+    caption = "Σ (# × m)",
+    tooltip = { "ocs-launching-calculator.header-sum-mass" },
+    style = "caption_label",
+  }
+  gui_table.add {
+    type = "label",
+    caption = "[img=item/rocket-part]",
+    -- caption = { "ocs-launching-calculator.header-rocket-ratio" },
+    tooltip = { "ocs-launching-calculator.header-rocket-ratio-tooltip" },
+    style = "caption_label",
+  }
+
+  -- Values row
+  gui_table.add {
+    type = "label",
+    caption = type_caption,
+    style = "caption_label",
+  }
+  gui_table.add {
+    type = "label",
+    caption = "",
+  }
+  gui_table.add {
+    type = "label",
+    name = "ocs_launching_calculator_" .. side .. "_amount_sum",
+    caption = display_number(amount_total, decimals),
+    style = "label",
+  }
   gui_table.add {
     type = "label",
     name = "ocs_launching_calculator_" .. side .. "_mass_sum",
     caption = display_number(total, decimals),
-    style = "caption_label"
+    style = "label",
   }
-  -- Future rocket-ratio sum cell:
-  -- gui_table.add { type = "label", caption = display_number(total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals) }
+  gui_table.add {
+    type = "label",
+    name = "ocs_launching_calculator_" .. side .. "_rocket_ratio_sum",
+    caption = display_number(total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals),
+    style = "label",
+  }
+
+  -- Future rocket-ratio cell:
+  -- gui_table.add {
+  --   type = "label",
+  --   name = "ocs_launching_calculator_" .. side .. "_rocket_ratio_sum",
+  --   caption = display_number(total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals),
+  --   style = "caption_label",
+  -- }
 end
 
 local function included_total(gui_table)
@@ -211,6 +352,7 @@ end
 -- ==============================================================================
 -- GUI Functions
 
+---Standard Recipe Frame
 local function get_recipe_table(frame, side)
   if not (frame and frame.valid) then return end
   local body = frame["ocs_launching_calculator_body"]
@@ -237,6 +379,7 @@ local function get_sum_table(frame, side)
   return sums_flow[side == "input" and INPUT_SUM_TABLE_NAME or OUTPUT_SUM_TABLE_NAME]
 end
 
+---Filling tables for inputs/outputs/summs and display recommendation
 local function recalculate(player)
   local frame = player.gui.screen[FRAME_NAME]
   if not (frame and frame.valid) then return end
@@ -251,30 +394,71 @@ local function recalculate(player)
   local decimals = player_decimals(player)
   local input_total = included_total(input_table)
   local output_total = included_total(output_table)
+  local input_amount_total = included_amount_total(input_table)
+  local output_amount_total = included_amount_total(output_table)
   local input_sum_table = get_sum_table(frame, "input")
   local output_sum_table = get_sum_table(frame, "output")
   local input_mass_sum = input_sum_table and input_sum_table["ocs_launching_calculator_input_mass_sum"]
   local output_mass_sum = output_sum_table and output_sum_table["ocs_launching_calculator_output_mass_sum"]
+  local input_amount_sum = input_sum_table and input_sum_table["ocs_launching_calculator_input_amount_sum"]
+  local output_amount_sum = output_sum_table and output_sum_table["ocs_launching_calculator_output_amount_sum"]
+  -- rocket_ratio
+  local input_ratio_sum = input_sum_table and input_sum_table["ocs_launching_calculator_input_rocket_ratio_sum"]
+  local output_ratio_sum = output_sum_table and output_sum_table["ocs_launching_calculator_output_rocket_ratio_sum"]
 
-  if not (input_mass_sum and input_mass_sum.valid
-        and output_mass_sum and output_mass_sum.valid) then
+  if not (
+        input_mass_sum and input_mass_sum.valid
+        and output_mass_sum and output_mass_sum.valid
+        and input_amount_sum and input_amount_sum.valid
+        and output_amount_sum and output_amount_sum.valid
+        and input_ratio_sum and input_ratio_sum.valid
+        and output_ratio_sum and output_ratio_sum.valid
+      ) then
     return
   end
 
+  input_amount_sum.caption = display_number(input_amount_total, decimals)
+  output_amount_sum.caption = display_number(output_amount_total, decimals)
   input_mass_sum.caption = display_number(input_total, decimals)
   output_mass_sum.caption = display_number(output_total, decimals)
   -- Future rocket-ratio updates:
-  -- input_ratio_sum.caption = display_number(input_total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals)
-  -- output_ratio_sum.caption = display_number(output_total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals)
+  input_ratio_sum.caption = display_number(input_total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals)
+  output_ratio_sum.caption = display_number(output_total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals)
 
   local recommendation = frame[RECOMMENDATION_NAME]
   if not (recommendation and recommendation.valid) then return end
+  local detail = frame["ocs_launching_calculator_recommendation_detail"]
+  if not (detail and detail.valid) then return end
   if input_total < output_total then
     recommendation.caption = { "ocs-launching-calculator.recommend-inputs" }
   elseif output_total < input_total then
     recommendation.caption = { "ocs-launching-calculator.recommend-outputs" }
   else
     recommendation.caption = { "ocs-launching-calculator.recommend-equal" }
+  end
+  local heavier_total = math.max(input_total, output_total)
+  local lighter_total = math.min(input_total, output_total)
+
+  if heavier_total > 0 and lighter_total < heavier_total then
+    local improvement = (heavier_total - lighter_total) / heavier_total * 100
+    local ratio = heavier_total / lighter_total
+    detail.caption = {
+      "ocs-launching-calculator.recommendation-detail",
+      display_number(improvement, decimals)
+    }
+    local detail2 = frame["ocs_launching_calculator_recommendation_detail2"]
+    if detail2 and detail2.valid then
+      detail2.caption = {
+        "ocs-launching-calculator.recommendation-detail2",
+        display_number(ratio, decimals)
+      }
+    end
+  else
+    detail.caption = ""
+    local detail2 = frame["ocs_launching_calculator_recommendation_detail2"]
+    if detail2 and detail2.valid then
+      detail2.caption = ""
+    end
   end
 end
 
@@ -290,8 +474,10 @@ local function clear_recipe_tables(player)
     gui_table.clear()
     add_headers(gui_table)
     local sum_table = get_sum_table(frame, side)
-    sum_table.clear()
-    add_sum_row(sum_table, side, 0, decimals)
+    if sum_table and sum_table.valid then
+      sum_table.clear()
+      add_sum_row(sum_table, side, 0, 0, decimals)
+    end
   end
   frame[RECOMMENDATION_NAME].caption = { "ocs-launching-calculator.select-recipe" }
 end
@@ -299,6 +485,13 @@ end
 local function show_recipe(player, recipe_name)
   local frame = player.gui.screen[FRAME_NAME]
   if not (frame and frame.valid) then return end
+
+  -- Update recipe picker when a recipe is selected by clicking an item.
+  local selection = frame["ocs_launching_calculator_selection"]
+  local recipe_picker = selection and selection[RECIPE_PICKER_NAME]
+  if recipe_picker and recipe_picker.valid then
+    recipe_picker.elem_value = recipe_name
+  end
 
   local recipe = recipe_name and prototypes.recipe[recipe_name]
   if not recipe then
@@ -325,17 +518,22 @@ local function show_recipe(player, recipe_name)
     add_item_row(input_table, "input", index, ingredient, ingredient.amount, decimals)
   end
   for index, product in ipairs(recipe.products) do
-    add_item_row(output_table, "output", index, product, expected_product_amount(recipe, index), decimals)
+    add_item_row(output_table, "output", index, product, recipe.get_product_amount(index), decimals)
   end
   local input_sum_table = get_sum_table(frame, "input")
   local output_sum_table = get_sum_table(frame, "output")
-  input_sum_table.clear()
-  output_sum_table.clear()
-  add_sum_row(input_sum_table, "input", 0, decimals)
-  add_sum_row(output_sum_table, "output", 0, decimals)
+  if input_sum_table and input_sum_table.valid then
+    input_sum_table.clear()
+    add_sum_row(input_sum_table, "input", 0, 0, decimals)
+  end
+  if output_sum_table and output_sum_table.valid then
+    output_sum_table.clear()
+    add_sum_row(output_sum_table, "output", 0, 0, decimals)
+  end
   recalculate(player)
 end
 
+---Main GUI frame
 local function create_calculator(player)
   local old_frame = player.gui.screen[FRAME_NAME]
   if old_frame then old_frame.destroy() end
@@ -343,13 +541,26 @@ local function create_calculator(player)
   frame.auto_center = true
   frame.style.width = WINDOW_WIDTH
 
+  -- titlebar
   local titlebar = frame.add { type = "flow", direction = "horizontal" }
   titlebar.drag_target = frame
   titlebar.style.horizontally_stretchable = true
-  titlebar.add { type = "label", caption = { "ocs-launching-calculator.title" }, style = "frame_title" }
-  local filler = titlebar.add { type = "empty-widget", style = "draggable_space_header" }
+  titlebar.add {
+    type = "label",
+    caption = { "ocs-launching-calculator.title" },
+    style = "frame_title",
+    ignored_by_interaction = true,
+  }
+
+  -- filler
+  local filler = titlebar.add {
+    type = "empty-widget",
+    style = "draggable_space_header",
+    ignored_by_interaction = true
+  }
   filler.style.horizontally_stretchable = true
-  filler.drag_target = frame
+  filler.style.height = 24
+  filler.style.right_margin = 4
   titlebar.add {
     type = "sprite-button",
     name = "ocs_launching_calculator_close",
@@ -358,6 +569,7 @@ local function create_calculator(player)
     tooltip = { "ocs-launching-calculator.close" }
   }
 
+  -- Recipe Selection Frame
   local selection = frame.add {
     type = "frame",
     name = "ocs_launching_calculator_selection",
@@ -368,11 +580,16 @@ local function create_calculator(player)
   selection.add { type = "choose-elem-button", name = RECIPE_PICKER_NAME, elem_type = "recipe" }
   selection.add { type = "label", name = "ocs_launching_calculator_recipe_name", caption = { "ocs-launching-calculator.no-recipe" } }
 
+  -- Input/Output Frame
   local body = frame.add {
     type = "flow",
     name = "ocs_launching_calculator_body",
     direction = "horizontal"
   }
+  local TABLE_COLUMN_COUNT = 8
+  local TABLE_SPACING = 8 * 2
+
+  -- Input Frame
   local input_column = body.add {
     type = "frame",
     name = "ocs_launching_calculator_input_column",
@@ -381,7 +598,14 @@ local function create_calculator(player)
   }
   input_column.add { type = "label", caption = { "ocs-launching-calculator.inputs" }, style = "heading_2_label" }
   input_column.style.width = COLUMN_WIDTH
-  input_column.add { type = "table", name = INPUT_TABLE_NAME, column_count = 6 }
+  local input_table = input_column.add {
+    type = "table",
+    name = INPUT_TABLE_NAME,
+    column_count = TABLE_COLUMN_COUNT
+  }
+  input_table.style.horizontal_spacing = TABLE_SPACING
+
+  -- Output Frame
   local output_column = body.add {
     type = "frame",
     name = "ocs_launching_calculator_output_column",
@@ -390,19 +614,58 @@ local function create_calculator(player)
   }
   output_column.add { type = "label", caption = { "ocs-launching-calculator.outputs" }, style = "heading_2_label" }
   output_column.style.width = COLUMN_WIDTH
-  output_column.add { type = "table", name = OUTPUT_TABLE_NAME, column_count = 6 }
+  local output_table = output_column.add {
+    type = "table",
+    name = OUTPUT_TABLE_NAME,
+    column_count = TABLE_COLUMN_COUNT
+  }
+  output_table.style.horizontal_spacing = TABLE_SPACING
+
+  -- Sum Frame
   local sums_flow = frame.add {
-    type = "frame", name = "ocs_launching_calculator_sums", direction = "horizontal",
+    type = "frame",
+    name = "ocs_launching_calculator_sums",
+    direction = "horizontal",
     style = "inside_shallow_frame_with_padding"
   }
-  sums_flow.add { type = "table", name = INPUT_SUM_TABLE_NAME, column_count = 6 }
-  sums_flow.add { type = "table", name = OUTPUT_SUM_TABLE_NAME, column_count = 6 }
-  sums_flow[INPUT_SUM_TABLE_NAME].style.width = COLUMN_WIDTH
-  sums_flow[OUTPUT_SUM_TABLE_NAME].style.width = COLUMN_WIDTH
-  frame.add { type = "label", name = RECOMMENDATION_NAME, caption = { "ocs-launching-calculator.select-recipe" }, style = "heading_2_label" }
+  local input_sum_table = sums_flow.add {
+    type = "table",
+    name = INPUT_SUM_TABLE_NAME,
+    column_count = 5
+  }
+  input_sum_table.style.horizontal_spacing = TABLE_SPACING
+  input_sum_table.style.width = COLUMN_WIDTH
+  local output_sum_table = sums_flow.add {
+    type = "table",
+    name = OUTPUT_SUM_TABLE_NAME,
+    column_count = 5
+  }
+  output_sum_table.style.width = COLUMN_WIDTH
+  output_sum_table.style.horizontal_spacing = TABLE_SPACING
+
+  -- Recomendation Frame
+  frame.add {
+    type = "label",
+    name = RECOMMENDATION_NAME,
+    caption = { "ocs-launching-calculator.select-recipe" },
+    style = "heading_2_label",
+  }
+  frame.add {
+    type = "label",
+    name = "ocs_launching_calculator_recommendation_detail",
+    caption = "",
+    style = "label"
+  }
+  frame.add {
+    type = "label",
+    name = "ocs_launching_calculator_recommendation_detail2",
+    caption = "",
+    style = "label"
+  }
   clear_recipe_tables(player)
 end
 
+---Main button (top left corner)
 local function create_main_button(player)
   local flow = mod_gui.get_button_flow(player)
   if flow.ocs_launching_calculator_button then return end
@@ -434,9 +697,21 @@ script.on_event(defines.events.on_gui_click, function(event)
   if element.name == "ocs_launching_calculator_button" then
     local frame = player.gui.screen[FRAME_NAME]
     if frame then frame.destroy() else create_calculator(player) end
+    return
   elseif element.name == "ocs_launching_calculator_close" then
     local frame = player.gui.screen[FRAME_NAME]
     if frame then frame.destroy() end
+    return
+  end
+
+  -- clicking on icon selects "obvious" recipe
+  local tags = element.tags
+  if tags.action == "select-recipe-for-product" then
+    local recipe = find_unique_recipe_for_product(tags.item_name, tags.item_type)
+    if recipe then
+      show_recipe(player, recipe.name)
+    end
+    return
   end
 end)
 

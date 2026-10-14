@@ -4,7 +4,7 @@
     "title": "OCs Rocket Launching Calculator",
     "author": "OC1024",
     "space_travel_required": true,
-    "description": "This mot shall calculate if it is cheaper launch educts or products of a chosen recipe.",
+    "description": "This mod shall calculate if it is cheaper launch educts or products of a chosen recipe.",
     "factorio_version": "2.1",
     "dependencies": [
       "base >= 2.1",
