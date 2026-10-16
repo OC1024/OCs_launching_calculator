@@ -1,11 +1,11 @@
-local TOOLTIP_NAME = {"item-weight-tooltip.name"}
+local TOOLTIP_NAME = {"description.weight"}
 
 local function get_weight_localised(weight)
-  if weight >= 1000000 then
-    local tons = weight / 1000000
+  if weight >= 1e6 then
+    local tons = weight / 1e6
     return {"tons", tostring(tons), tostring(tons)}
   else
-    local kg = weight / 1000
+    local kg = weight / 1e3
     return {"", tostring(kg), " ", {"si-unit-kilogram"}}
   end
 end
@@ -42,7 +42,7 @@ end
 local list = {}
 for name, item in pairs(data.raw.item or {}) do
   if item.weight == nil then
-    table.instert(list, name)
+    table.insert(list, name)
   end
 end
 log("[Weight tooltip] Missing explicit item weight: " .. serpent.block(list))
