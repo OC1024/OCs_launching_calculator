@@ -20,7 +20,16 @@ data:extend({
     type = "bool-setting",
     name = "oc-calc-show-item-name",
     setting_type = "runtime-per-user",
-    ordre = "bb",
+    order = "bb",
     default_value = true,
-  }
+  },
+  {
+    type = "int-setting",
+    name = "oc-calc-compact-window-factor",
+    setting_type = "runtime-per-user",
+    order = "bc",
+    default_value = 70,
+    minimum_value = 0,
+    maximum_value = 100,
+  },
 })

@@ -45,16 +45,36 @@ local function player_gui_settings(player)
 
   local window_width = settings["oc-calc-window-width"].value
   local show_item_name = settings["oc-calc-show-item-name"].value
-  window_width = show_item_name and window_width or window_width * 0.7-- arbitrary reduction
+  local slim_factor  = settings["oc-calc-compact-window-factor"].value / 100 or 0.7 -- in per cent
+  window_width = show_item_name and window_width or window_width * slim_factor  -- arbitrary reduction
   local decimals = settings["round_decimals"].value
 
   return {
     window_width = window_width,
-    column_width = window_width / 2 - 14,
+    column_width = window_width / 2 - 14, -- 12 is the usual padding size
     show_item_name = show_item_name,
-    table_column_count = show_item_name and 8 or 7,
     decimals = decimals
   }
+end
+
+---Get persistent calculator state for a player. Contains recipe, rocket, and silo.
+---@param player LuaPlayer
+---@return table
+local function player_calculator_state(player)
+  storage.calculator_state = storage.calculator_state or {}
+  local state = storage.calculator_state[player.index]
+  if not state then
+    state = {
+      selected_recipe = nil,             -- main recipe for the calculator
+      selected_silo_name = nil,          -- entity where the rocket is crafted
+      selected_rocket_recipe_name = nil, -- recipe of the rocket
+      window_location = nil,
+      is_minimised = false,
+
+    }
+    storage.calculator_state[player.index] = state
+  end
+  return state
 end
 
 ---A barrel normally has a matching fill recipe. This supports modded barrel
@@ -145,8 +165,95 @@ local function find_unique_recipe_for_product(item_name, item_type)
   return unique_recipe or nil
 end
 
+---Check whether an array contains a value.
+---@param array table
+---@param value any
+---@return boolean
+local function array_contains(array, value)
+  for _, entry in pairs(array) do
+    if entry == value then return true end
+  end
+  return false
+end
+
 -- ==============================================================================
--- GUI Functions
+-- Rockets and Silo Functions
+
+---Get all entities usable as rocket silos.
+---@return table[] silos
+local function get_rocket_silos()
+  local silos = {}
+  for name, prototype in pairs(prototypes.entity) do
+    local is_rocket_silo = prototype.type == "rocket-silo"
+    local has_rocket_building_category =
+        prototype.crafting_categories
+        and prototype.crafting_categories["rocket-building"]
+    if is_rocket_silo or has_rocket_building_category then
+      silos[#silos + 1] = {
+        name = name,
+        localised_name = prototype.localised_name,
+        sprite = "entity/" .. name,
+        lift_weight = prototype.lift_weight,
+        rocket_parts_required = prototype.rocket_parts_required,
+      }
+    end
+  end
+  table.sort(silos, function(a, b)
+    return a.name < b.name
+  end)
+  return silos
+end
+
+---Get recipes in the rocket-building category.
+---@return table[] recipes
+local function get_rocket_recipes()
+  local recipes = {}
+  for name, prototype in pairs(prototypes.recipe) do
+    if prototype.categories and array_contains(prototype.categories, "rocket-building") then
+      recipes[#recipes + 1] = {
+        name = name,
+        localised_name = prototype.localised_name,
+        sprite = "recipe/" .. name,
+        products = prototype.products,
+      }
+    end
+  end
+  table.sort(recipes, function(a, b)
+    return a.name < b.name
+  end)
+  return recipes
+end
+
+---Build dropdown items and resolve the saved selection.
+---@param entries table[]
+---@param selected_name string?
+---@return string[] items
+---@return integer selected_index
+---@return table? selected_entry
+local function prepare_selection(entries, selected_name)
+  local items = {}
+  local selected_index = 0
+  local selected_entry = nil
+
+  for i, entry in ipairs(entries) do
+    items[i] = entry.localised_name or entry.name
+
+    if entry.name == selected_name then
+      selected_index = i
+      selected_entry = entry
+    end
+  end
+
+  if not selected_entry and #entries > 0 then
+    selected_index = 1
+    selected_entry = entries[1]
+  end
+
+  return items, selected_index, selected_entry
+end
+
+-- ==============================================================================
+-- GUI Helper Functions
 
 ---Headers for Input/Output tables
 local function add_headers(gui_table, gui_settings)
@@ -330,6 +437,13 @@ local function update_fluid_row(checkbox, gui_settings)
   end
 end
 
+---Add header and totals rows to a recipe summary table.
+---@param gui_table LuaGuiElement
+---@param side "input"|"output"
+---@param amount_total number Total item amount.
+---@param total number Total mass.
+---@param gui_settings table
+---@return nil
 local function add_sum_row(gui_table, side, amount_total, total, gui_settings)
   local type_caption = {
     side == "input"
@@ -413,14 +527,14 @@ end
 ---Standard Recipe Frame
 local function get_recipe_table(frame, side)
   if not (frame and frame.valid) then return end
-  local body = frame["ocs_launching_calculator_body"]
-  if not (body and body.valid) then return nil end
+  local io_body = frame["ocs_launching_calculator_io_body"]
+  if not (io_body and io_body.valid) then return nil end
 
   local column_name = side == "input"
       and "ocs_launching_calculator_input_column"
       or "ocs_launching_calculator_output_column"
 
-  local column = body[column_name]
+  local column = io_body[column_name]
   if not (column and column.valid) then return nil end
 
   local table_name = side == "input"
@@ -439,12 +553,12 @@ end
 
 ---Filling tables for inputs/outputs/summs and display recommendation
 local function recalculate(player, selected_recipe)
-  local frame = player.gui.screen[FRAME_NAME]
+  local head_frame = player.gui.screen[FRAME_NAME]
+  if not (head_frame and head_frame.valid) then return end
+  local frame = head_frame["ocs_launching_calculator_content"]
   if not (frame and frame.valid) then return end
-
   local input_table = get_recipe_table(frame, "input")
   local output_table = get_recipe_table(frame, "output")
-
   if not (input_table and input_table.valid and output_table and output_table.valid) then
     return
   end
@@ -541,37 +655,47 @@ end
 
 ---Recipe Picker Frame
 ---@param player LuaPlayer
----@param recipe_name string
+---@param recipe_name string|nil
 local function show_recipe(player, recipe_name)
-  local frame = player.gui.screen[FRAME_NAME]
-  if not (frame and frame.valid) then return end
+  local head_frame = player.gui.screen[FRAME_NAME]
+  if not (head_frame and head_frame.valid) then return end
+  local mane_frame = head_frame["ocs_launching_calculator_content"]
+  if not (mane_frame and mane_frame.valid) then return end
   local gui_settings = player_gui_settings(player)
 
   -- Update recipe picker when a recipe is selected by clicking an item.
-  local selection = frame["ocs_launching_calculator_selection"]
+  local selection = mane_frame["ocs_launching_calculator_selection"]
   if not (selection and selection.valid) then return end
   local recipe_row = selection["ocs_launching_calculator_recipe_row"]
   local recipe_picker = recipe_row and recipe_row[RECIPE_PICKER_NAME]
   local recipe_name_label = recipe_row and recipe_row["ocs_launching_calculator_recipe_name"]
 
-  if not (recipe_picker and recipe_picker.valid
-      and recipe_name_label and recipe_name_label.valid) then
+  log("SHOW picker valid: " .. tostring(recipe_picker and recipe_picker.valid))--debug
+  log("SHOW label valid: " .. tostring(recipe_name_label and recipe_name_label.valid)) -- debug
+  if not (recipe_picker and recipe_picker.valid and recipe_name_label and recipe_name_label.valid) then
     return
   end
 
   local recipe = recipe_name and prototypes.recipe[recipe_name]
+  log("SHOW recipe_name: " .. serpent.line(recipe_name)) -- debug
+  log("SHOW prototype exists: " .. tostring(recipe ~= nil)) -- debug
   if not recipe then
     recipe_picker.elem_value = nil
-    recipe_name_label.caption = {"ocs-launching-calculator.no-recipe"}
+    recipe_name_label.caption = { "ocs-launching-calculator.no-recipe" }
     clear_recipe_tables(player)
     recalculate(player, nil)
     return
   end
-  recipe_picker.elem_value = recipe_name
+  local state = player_calculator_state(player)
+  state.selected_recipe = recipe_name
+  if recipe_picker.elem_value ~= recipe_name then
+    recipe_picker.elem_value = recipe_name
+  end
   recipe_name_label.caption = recipe.localised_name
+  log("SHOW label updated for: " .. recipe.name) -- debug
 
-  local input_table = get_recipe_table(frame, "input")
-  local output_table = get_recipe_table(frame, "output")
+  local input_table = get_recipe_table(mane_frame, "input")
+  local output_table = get_recipe_table(mane_frame, "output")
   if not (input_table and input_table.valid and output_table and output_table.valid) then
     return
   end
@@ -586,8 +710,8 @@ local function show_recipe(player, recipe_name)
   for index, product in ipairs(recipe.products) do
     add_item_row(output_table, "output", index, product, recipe.get_product_amount(index), gui_settings)
   end
-  local input_sum_table = get_sum_table(frame, "input")
-  local output_sum_table = get_sum_table(frame, "output")
+  local input_sum_table = get_sum_table(mane_frame, "input")
+  local output_sum_table = get_sum_table(mane_frame, "output")
   if input_sum_table and input_sum_table.valid then
     input_sum_table.clear()
     add_sum_row(input_sum_table, "input", 0, 0, gui_settings)
@@ -599,18 +723,27 @@ local function show_recipe(player, recipe_name)
   recalculate(player, recipe_name)
 end
 
----Main GUI frame
+-- ------------------------------------------------------------------------------
+---GUI Main Frame
 local function create_calculator(player)
   local old_frame = player.gui.screen[FRAME_NAME]
   if old_frame then old_frame.destroy() end
-  local mane_frame = player.gui.screen.add { type = "frame", name = FRAME_NAME, direction = "vertical" }
+  local head_frame = player.gui.screen.add { type = "frame", name = FRAME_NAME, direction = "vertical" }
+  -- State settings
+  local state = player_calculator_state(player)
+  -- GUI settings
   local gui_settings = player_gui_settings(player)
-  mane_frame.auto_center = true
-  mane_frame.style.width = gui_settings.window_width
+  if state.window_location then
+    head_frame.location = state.window_location
+  else
+    head_frame.auto_center = true
+  end
+  head_frame.style.width = gui_settings.window_width
 
-  -- titlebar
-  local titlebar = mane_frame.add { type = "flow", direction = "horizontal" }
-  titlebar.drag_target = mane_frame
+  -- =======================================
+  -- Titlebar
+  local titlebar = head_frame.add { type = "flow", direction = "horizontal" }
+  titlebar.drag_target = head_frame
   titlebar.style.horizontally_stretchable = true
   titlebar.add {
     type = "label",
@@ -618,7 +751,10 @@ local function create_calculator(player)
     style = "frame_title",
     ignored_by_interaction = true,
   }
-  -- filler
+  -- Titlebar-flow
+  local mane_frame = head_frame.add { type = "flow", name = "ocs_launching_calculator_content", direction = "vertical" }
+  mane_frame.visible = not state.is_minimised
+  -- Draggable Filler
   local filler = titlebar.add {
     type = "empty-widget",
     style = "draggable_space_header",
@@ -627,6 +763,17 @@ local function create_calculator(player)
   filler.style.horizontally_stretchable = true
   filler.style.height = 24
   filler.style.right_margin = 4
+  -- Collapse Button
+  titlebar.add {
+    type = "sprite-button",
+    name = "ocs_launching_calculator_minimise",
+    sprite = state.is_minimised and "utility/expand" or "utility/collapse",
+    style = "frame_action_button",
+    tooltip = state.is_minimised
+        and { "ocs-launching-calculator.restore" }
+        or { "ocs-launching-calculator.minimise" }
+  }
+  -- Close Button
   titlebar.add {
     type = "sprite-button",
     name = "ocs_launching_calculator_close",
@@ -634,6 +781,114 @@ local function create_calculator(player)
     style = "frame_action_button",
     tooltip = { "ocs-launching-calculator.close" }
   }
+
+  -- =======================================
+  -- Rocket Silo and Rocke Recipe Frame (optional)
+  local rocket_silo_frame = mane_frame.add {
+    type = "flow",
+    name = MANE_NAME .. "_rocket_silo",
+    direction = "horizontal",
+  }
+  -- ---------------------------------------
+  -- Silo Subframe
+  local silo_frame = rocket_silo_frame.add {
+    type = "frame",
+    name = MANE_NAME .. "_silo_frame",
+    direction = "vertical",
+    style = "inside_shallow_frame_with_padding",
+  }
+  silo_frame.style.width = gui_settings.column_width
+  silo_frame.add { type = "label", caption = { "ocs-launching-calculator.silo-types" }, style = "heading_2_label" }
+  -- Silo selection row (icon + dropdown)
+  local silo_selection = silo_frame.add {
+    type = "flow",
+    name = MANE_NAME .. "_silo_selection",
+    direction = "horizontal",
+  }
+  local silos = get_rocket_silos()
+  local silo_items, silo_index, selected_silo = prepare_selection(silos, state.selected_silo_name)
+  if selected_silo then
+    state.selected_silo_name = selected_silo.name
+  end
+  -- Current silo icon
+  silo_selection.add {
+    type = "sprite",
+    name = MANE_NAME .. "_silo_icon",
+    sprite = selected_silo and selected_silo.sprite or "entity/rocket-silo",
+  }
+  -- Silo dropdown
+  silo_selection.add {
+    type = "drop-down",
+    name = MANE_NAME .. "_silo_dropdown",
+    items = silo_items,
+    selected_index = silo_index,
+    enabled = #silo_items > 0,
+  }
+  -- Maximum lift weight
+  silo_frame.add {
+    type = "label",
+    name = MANE_NAME .. "_silo_lift_weight",
+    caption = { "ocs-launching-calculator.max-lift-weight",
+      selected_silo and display_number(selected_silo.lift_weight / 1e3, 0) .. " kg" or "—", } -- hardcoded 0 decimals
+  }
+
+  -- ---------------------------------------
+  -- Rocket Subframe
+  local rocket_frame = rocket_silo_frame.add {
+    type = "frame",
+    name = MANE_NAME .. "_rocket_frame",
+    direction = "vertical",
+    style = "inside_shallow_frame_with_padding",
+  }
+  rocket_frame.style.width = gui_settings.column_width
+  rocket_frame.add { type = "label", caption = { "ocs-launching-calculator.rocket-types" }, style = "heading_2_label" }
+  local rocket_recipes = get_rocket_recipes()
+  local r_items, recipe_index, selected_r_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name)
+  -- Rocket recipe selection row
+  local rocket_selection = rocket_frame.add {
+    type = "flow",
+    name = MANE_NAME .. "_rocket_selection",
+    direction = "horizontal",
+  }
+  -- Current rocket-part icon
+  rocket_selection.add {
+    type = "sprite",
+    name = MANE_NAME .. "_rocket_icon",
+    sprite = selected_r_recipe and selected_r_recipe.sprite or "item/rocket-part",
+  }
+  -- Rocket-recipe dropdown
+  rocket_selection.add {
+    type = "drop-down",
+    name = MANE_NAME .. "_rocket_dropdown",
+    items = r_items,
+    selected_index = recipe_index,
+    enabled = #r_items > 0,
+  }
+  -- Rocket recipe cycles required
+  local parts_per_cycle = 0
+  if selected_r_recipe then
+    for _, product in pairs(selected_r_recipe.products or {}) do
+      if product.name == "rocket-part" then
+        parts_per_cycle = product.amount or product.amount_max or 0
+        break
+      end
+    end
+  end
+  local cycles = 0
+  if selected_silo and parts_per_cycle > 0 then
+    cycles = math.ceil(selected_silo.rocket_parts_required / parts_per_cycle)
+  end
+  rocket_frame.add {
+    type = "label",
+    name = MANE_NAME .. "_rocket_recipe_tip",
+    caption = {
+      "ocs-launching-calculator.rocket-recipe-tip",
+      cycles > 0 and display_number(cycles, gui_settings.decimals) or "—",
+    },
+  }
+
+  -- =======================================
+  -- Recipe Selection Section
 
   -- Recipe Selection Frame
   local selection = mane_frame.add {
@@ -654,17 +909,19 @@ local function create_calculator(player)
   -- info line
   selection.add { type = "label", caption = { "ocs-launching-calculator.click-to-select-recipe" } }
 
+  -- =======================================
   -- Input/Output Frame
-  local body = mane_frame.add {
+  local io_frame = mane_frame.add {
     type = "flow",
-    name = "ocs_launching_calculator_body",
+    name = "ocs_launching_calculator_io_body",
     direction = "horizontal"
   }
   local TABLE_COLUMN_COUNT = gui_settings.show_item_name and 8 or 7
   local TABLE_SPACING = 8 * 2
 
+  -- ---------------------------------------
   -- Input Frame
-  local input_column = body.add {
+  local input_column = io_frame.add {
     type = "frame",
     name = "ocs_launching_calculator_input_column",
     direction = "vertical",
@@ -679,8 +936,9 @@ local function create_calculator(player)
   }
   input_table.style.horizontal_spacing = TABLE_SPACING
 
+  -- ---------------------------------------
   -- Output Frame
-  local output_column = body.add {
+  local output_column = io_frame.add {
     type = "frame",
     name = "ocs_launching_calculator_output_column",
     direction = "vertical",
@@ -695,6 +953,7 @@ local function create_calculator(player)
   }
   output_table.style.horizontal_spacing = TABLE_SPACING
 
+  -- =======================================
   -- Sum Frame
   local sums_flow = mane_frame.add {
     type = "frame",
@@ -717,6 +976,7 @@ local function create_calculator(player)
   output_sum_table.style.width = gui_settings.column_width
   output_sum_table.style.horizontal_spacing = TABLE_SPACING
 
+  -- =======================================
   -- Recomendation Frame
   mane_frame.add {
     type = "label",
@@ -738,7 +998,19 @@ local function create_calculator(player)
     style = "label",
     visible = false,
   }
-  clear_recipe_tables(player)
+  -- =======================================
+  -- After building the Mane Frame
+  local recipe_name = state.selected_recipe
+  -- debug start
+  log("OPEN recipe: " .. serpent.line(recipe_name))
+  log("Recipe exists: " .. tostring(recipe_name and prototypes.recipe[recipe_name] ~= nil))
+  -- debug end
+  if recipe_name and prototypes.recipe[recipe_name] then
+    show_recipe(player, recipe_name)
+  else
+    show_recipe(player, nil)
+  end
+  -- clear_recipe_tables(player) --clearing the user inputs
 end
 
 ---Main button (top left corner)
@@ -754,7 +1026,7 @@ end
 -- ==============================================================================
 -- Scripts
 
----Create main button
+--Create main button
 script.on_init(function()
   for _, player in pairs(game.players) do create_main_button(player) end
 end)
@@ -767,18 +1039,37 @@ script.on_event(defines.events.on_player_created, function(event)
   create_main_button(game.get_player(event.player_index))
 end)
 
----Create Mane Frame OR click on item
+---Handle calculator open/close clicks and recipe selection via item icons.
 script.on_event(defines.events.on_gui_click, function(event)
   local player = game.get_player(event.player_index)
   local element = event.element
   if not (element and element.valid) then return end
-  if element.name == "ocs_launching_calculator_button" then
+  if element.name == "ocs_launching_calculator_button" then -- interact
     local frame = player.gui.screen[FRAME_NAME]
     if frame then frame.destroy() else create_calculator(player) end
     return
-  elseif element.name == "ocs_launching_calculator_close" then
+  elseif element.name == "ocs_launching_calculator_close" then   -- MANE close
     local frame = player.gui.screen[FRAME_NAME]
+    local state = player_calculator_state(player)                --debug
+    log("CLOSE recipe: " .. serpent.line(state.selected_recipe)) --debug
     if frame then frame.destroy() end
+    return
+  elseif element.name == "ocs_launching_calculator_minimise" then -- MANE minimise
+    local state = player_calculator_state(player)
+    state.is_minimised = not state.is_minimised
+    local frame = player.gui.screen[FRAME_NAME]
+    if frame and frame.valid then
+      local content = frame["ocs_launching_calculator_content"]
+      if content and content.valid then
+        content.visible = not state.is_minimised
+      end
+      element.sprite = state.is_minimised
+          and "utility/expand"
+          or "utility/collapse"
+      element.tooltip = state.is_minimised
+          and { "ocs-launching-calculator.restore" }
+          or { "ocs-launching-calculator.minimise" }
+    end
     return
   end
 
@@ -793,12 +1084,77 @@ script.on_event(defines.events.on_gui_click, function(event)
   end
 end)
 
+--Save and Update Window position
+script.on_event(defines.events.on_gui_location_changed, function(event)
+  local element = event.element
+  if not (element and element.valid and element.name == FRAME_NAME) then
+    return
+  end
+  local player = game.get_player(event.player_index)
+  local state = player_calculator_state(player)
+  state.window_location = element.location
+end)
+
 ---Update the calculator when player changes the recipe picker
---- @param event EventData 
+--- @param event EventData
 script.on_event(defines.events.on_gui_elem_changed, function(event)
   local element = event.element
-  if element and element.valid and element.name == RECIPE_PICKER_NAME then
-    show_recipe(game.get_player(event.player_index), element.elem_value)
+  if not (element and element.valid and element.name == RECIPE_PICKER_NAME) then
+    return
+  end
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  local recipe_name = element.elem_value
+  log("before SAVE: " .. serpent.line(element.elem_value))
+  player_calculator_state(player).selected_recipe = recipe_name
+  -- debug
+  local state = player_calculator_state(player)
+  state.selected_recipe = element.elem_value
+  log("SAVE recipe: " .. serpent.line(state.selected_recipe))
+  -- debug
+  show_recipe(player, element.elem_value)
+end)
+
+---Handle changes to the selected silo or rocket recipe.
+script.on_event(defines.events.on_gui_selection_state_changed, function(event)
+  local element = event.element
+  if not (element and element.valid) then return end
+
+  local player = game.get_player(event.player_index)
+  local state = player_calculator_state(player)
+  local frame = player.gui.screen[FRAME_NAME]
+  if not (frame and frame.valid) then return end
+
+  if element.name == MANE_NAME .. "_silo_dropdown" then
+    local silos = get_rocket_silos()
+    local silo = silos[element.selected_index]
+    if not silo then return end
+
+    state.selected_silo_name = silo.name
+
+    local icon = frame[MANE_NAME .. "_rocket_silo"]
+        [MANE_NAME .. "_silo_frame"]
+        [MANE_NAME .. "_silo_selection"]
+        [MANE_NAME .. "_silo_icon"]
+
+    if icon and icon.valid then
+      icon.sprite = silo.sprite
+    end
+  elseif element.name == MANE_NAME .. "_rocket_dropdown" then
+    local rocket_recipes = get_rocket_recipes()
+    local recipe = rocket_recipes[element.selected_index]
+    if not recipe then return end
+
+    state.selected_rocket_recipe_name = recipe.name
+
+    local icon                        = frame[MANE_NAME .. "_rocket_silo"]
+        [MANE_NAME .. "_rocket_frame"]
+        [MANE_NAME .. "_rocket_selection"]
+        [MANE_NAME .. "_rocket_icon"]
+
+    if icon and icon.valid then
+      icon.sprite = recipe.sprite
+    end
   end
 end)
 

@@ -2,6 +2,10 @@
 Version: 0.1.0
 Date: 2026-10-13
   Major Features:
-    - Initial release of the launching calculator mod.
+    - The launching calculator has a recipe picker. Ingredients and results are individually toggelable for the total sum.
+    - Fluids are replaced by their barrel counterpart if possible. Toggling them shows the fluid. Fluids without a barreled version are always unchecked.
+    - Recommendation: Shows how much more heaviere side has and which percentage of rocket parts could (potentially) be saved.
+    - Items to heavy to lift are marked in red and a warning icon, but not by default deactivated.
+    - Some items have their weight as tooltip. At least those which are defined already at the data-final-updates-stage.
   Translation:
     - English and German localisation.
