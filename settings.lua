@@ -21,7 +21,7 @@ data:extend({
     name = "oc-calc-show-item-name",
     setting_type = "runtime-per-user",
     order = "bb",
-    default_value = true,
+    default_value = false,
   },
   {
     type = "int-setting",
@@ -31,5 +31,12 @@ data:extend({
     default_value = 70,
     minimum_value = 0,
     maximum_value = 100,
+  },
+  {
+    type = "bool-setting",
+    name = "oc-calc-advanced-mode",
+    setting_type = "runtime-per-user",
+    order = "c",
+    default_value = false,
   },
 })

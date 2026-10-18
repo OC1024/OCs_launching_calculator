@@ -14,7 +14,7 @@ local WEIGHT_PER_TON = 1e6      -- mass is in grams
 local ROCKET_LIFT_WEIGHT = prototypes.utility_constants.default_rocket_lift_weight
 local rocket_capacity = ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
 
---- Lua Things
+---Lua Things
 ---@class uint
 ---@class LuaEntity
 ---@class LuaPlayer
@@ -27,12 +27,19 @@ local rocket_capacity = ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
 -- ==============================================================================
 -- Helper Functions
 
----Rounds to a given decimal place, zero possible; adds spaces as thousands separators.
+---Rounds to a given decimal place, zero possible; adds thousands separators. Integer display possible.
 ---@param value number
 ---@param decimals number
+---@param keep_int boolean|nil Display integer values without decimals.
 ---@return string
-local function display_number(value, decimals)
+local function display_number(value, decimals, keep_int)
   decimals = math.max(0, math.floor(tonumber(decimals) or 0))
+  if keep_int and (value % 1 == 0) then
+    decimals = 0
+  elseif value ~= 0 and math.abs(value) < 1 then
+    local significant_decimals = decimals - math.floor(math.log10(math.abs(value))) - 1
+    decimals = math.max(decimals, significant_decimals)
+  end
   local formatted = string.format("%." .. decimals .. "f", value)
   local integer, fraction = formatted:match("^(-?%d+)(.*)$")
   integer = integer:reverse():gsub("(%d%d%d)", "%1'"):reverse():gsub("^'", "")
@@ -41,19 +48,21 @@ end
 
 ---Returns GUI settings for a player.
 local function player_gui_settings(player)
-  local settings = settings.get_player_settings(player)
+  local settings       = settings.get_player_settings(player)
 
-  local window_width = settings["oc-calc-window-width"].value
+  local window_width   = settings["oc-calc-window-width"].value
   local show_item_name = settings["oc-calc-show-item-name"].value
-  local slim_factor  = settings["oc-calc-compact-window-factor"].value / 100 or 0.7 -- in per cent
-  window_width = show_item_name and window_width or window_width * slim_factor  -- arbitrary reduction
-  local decimals = settings["round_decimals"].value
+  local slim_factor    = settings["oc-calc-compact-window-factor"].value / 100 -- in per cent
+  window_width         = show_item_name and window_width or window_width * slim_factor
+  local decimals       = settings["round_decimals"].value
+  local advanced_mode  = settings["oc-calc-advanced-mode"].value -- show silos and rocket-parts
 
   return {
     window_width = window_width,
     column_width = window_width / 2 - 14, -- 12 is the usual padding size
     show_item_name = show_item_name,
-    decimals = decimals
+    advanced_mode = advanced_mode,
+    decimals = decimals,
   }
 end
 
@@ -70,10 +79,11 @@ local function player_calculator_state(player)
       selected_rocket_recipe_name = nil, -- recipe of the rocket
       window_location = nil,
       is_minimised = false,
-
+      checkbox_states = {}, -- unchecked items, indexed by recipe name
     }
     storage.calculator_state[player.index] = state
   end
+  state.checkbox_states = state.checkbox_states or {} -- temporal for me, myself
   return state
 end
 
@@ -335,7 +345,7 @@ local function set_row_display(gui_table, row_id, prototype, amount, unit_mass, 
   end
 
   -- Quantity and mass values
-  gui_table[row_id .. "_amount"].caption = display_number(amount, gui_settings.decimals)
+  gui_table[row_id .. "_amount"].caption = display_number(amount, gui_settings.decimals, true)
   gui_table[row_id .. "_unit_mass"].caption = display_number(unit_mass, gui_settings.decimals)
   gui_table[row_id .. "_unit_mass"].style = exceeds_capacity and "bold_red_label" or "label"
   gui_table[row_id .. "_total_mass"].caption = display_number(total_mass, gui_settings.decimals)
@@ -352,7 +362,13 @@ local function set_row_display(gui_table, row_id, prototype, amount, unit_mass, 
   gui_table[row_id .. "_include"].tags = tags
 end
 
----Creates the cells shared by item and fluid rows and returns their checkbox.
+---Creates the cells shared by item and fluid rows. Adds the checkbox, icon holder, and optional item-name label,
+---followed by the quantity, unit-mass, total-mass, rocket-ratio, and warning labels.
+---@param gui_table LuaGuiElement The table to which the row cells are added.
+---@param row_id string The row's identifier prefix, used to name each cell.
+---@param checkbox_spec table The element specification used to create the checkbox.
+---@param gui_settings table The player's GUI settings, including whether item names are shown.
+---@return LuaGuiElement checkbox The newly created checkbox element.
 local function add_row_cells(gui_table, row_id, checkbox_spec, gui_settings)
   local checkbox = gui_table.add(checkbox_spec)
   gui_table.add { type = "flow", name = row_id .. "_icon_holder", direction = "horizontal" }
@@ -365,60 +381,6 @@ local function add_row_cells(gui_table, row_id, checkbox_spec, gui_settings)
   gui_table.add { type = "label", name = row_id .. "_rocket_ratio" }
   gui_table.add { type = "label", name = row_id .. "_warning" }
   return checkbox
-end
-
----Adds an item row or a fluid row with an optional barrel representation.
-local function add_item_row(gui_table, side, index, entry, amount, gui_settings)
-  local row_id = "ocs_launching_calculator_" .. side .. "_" .. index
-  -- if non-barrel solid
-  if entry.type ~= "fluid" then
-    local prototype = prototypes.item[entry.name]
-    local unit_mass = prototype and prototype.weight / WEIGHT_PER_KILOGRAM or 0
-    add_row_cells(gui_table, row_id, {
-      type = "checkbox",
-      name = row_id .. "_include",
-      state = true,
-      tooltip = { "ocs-launching-calculator.include-row" },
-      tags = { row_type = "item", amount = amount, total_mass = amount * unit_mass }
-    }, gui_settings)
-    set_row_display(gui_table, row_id, prototype, amount, unit_mass, nil, false, gui_settings)
-    return
-  end
-
-  -- if barreled
-  local fluid = prototypes.fluid[entry.name]
-  local barrel = fluid_barrel_details(entry.name, amount)
-  if not barrel then
-    add_row_cells(gui_table, row_id, {
-      type = "checkbox",
-      name = row_id .. "_include",
-      state = false,
-      enabled = false,
-      tooltip = { "ocs-launching-calculator.no-barrel-tooltip" },
-      tags = { row_type = "unbarrelled-fluid", total_mass = 0 }
-    }, gui_settings)
-    set_row_display(gui_table, row_id, fluid, amount, 0, { "ocs-launching-calculator.no-barrel-note" }, true,
-      gui_settings)
-    return
-  end
-
-  -- if fluid
-  add_row_cells(gui_table, row_id, {
-    type = "checkbox",
-    name = row_id .. "_include",
-    state = true,
-    tooltip = { "ocs-launching-calculator.toggle-barrel" },
-    tags = {
-      row_type = "barrelled-fluid",
-      fluid_name = entry.name,
-      fluid_amount = amount,
-      barrel_name = barrel.prototype.name,
-      barrel_amount = barrel.amount,
-      total_mass = 0
-    }
-  }, gui_settings)
-  set_row_display(gui_table, row_id, barrel.prototype, barrel.amount, barrel.prototype.weight / WEIGHT_PER_KILOGRAM,
-    { "ocs-launching-calculator.converted-from-fluid" }, false, gui_settings)
 end
 
 ---Switches a barrel-capable fluid row between its fluid and barrel displays.
@@ -435,6 +397,82 @@ local function update_fluid_row(checkbox, gui_settings)
     set_row_display(gui_table, row_id, fluid, tags.fluid_amount, 0,
       { "ocs-launching-calculator.fluid-direct-note" }, true, gui_settings)
   end
+end
+
+---Adds an item row or a fluid row with an optional barrel representation.
+local function add_item_row(player, gui_table, side, index, entry, amount, recipe_name, gui_settings)
+  local row_id = "ocs_launching_calculator_" .. side .. "_" .. index
+  local table_type = side == "input" and "inputs" or "outputs"
+  local state = player_calculator_state(player)
+  -- checkbox state (if changed before)
+  local recipe_states = state.checkbox_states[recipe_name]
+  local table_states = recipe_states and recipe_states[table_type]
+  local saved_state = table_states and table_states[entry.name]
+  -- if non-barrel solid
+  if entry.type ~= "fluid" then
+    local prototype = prototypes.item[entry.name]
+    local unit_mass = prototype and prototype.weight / WEIGHT_PER_KILOGRAM or 0
+    add_row_cells(gui_table, row_id, {
+      type = "checkbox",
+      name = row_id .. "_include",
+      state = saved_state ~= false,
+      tooltip = { "ocs-launching-calculator.include-row" },
+      tags = {
+        row_type = "item",
+        recipe_name = recipe_name,
+        table_type = table_type,
+        item_name = entry.name,
+        amount = amount,
+        total_mass = amount * unit_mass,
+      }
+    }, gui_settings)
+    set_row_display(gui_table, row_id, prototype, amount, unit_mass, nil, false, gui_settings)
+    return
+  end
+
+  -- if barreled
+  local fluid = prototypes.fluid[entry.name]
+  local barrel = fluid_barrel_details(entry.name, amount)
+  if not barrel then
+    add_row_cells(gui_table, row_id, {
+      type = "checkbox",
+      name = row_id .. "_include",
+      state = saved_state ~= false,
+      enabled = false,
+      tooltip = { "ocs-launching-calculator.no-barrel-tooltip" },
+      tags = {
+        row_type = "unbarrelled-fluid",
+        recipe_name = recipe_name,
+        table_type = table_type,
+        fluid_name = entry.name,
+        total_mass = 0,
+      }
+    }, gui_settings)
+    set_row_display(gui_table, row_id, fluid, amount, 0, { "ocs-launching-calculator.no-barrel-note" }, true,
+      gui_settings)
+    return
+  end
+
+  -- if fluid (unbarreled)
+  local checkbox = add_row_cells(gui_table, row_id, {
+    type = "checkbox",
+    name = row_id .. "_include",
+    state = saved_state ~= false,
+    tooltip = { "ocs-launching-calculator.toggle-barrel" },
+    tags = {
+      row_type = "barrelled-fluid",
+      recipe_name = recipe_name,
+      table_type = table_type,
+      fluid_name = entry.name,
+      fluid_amount = amount,
+      barrel_name = barrel.prototype.name,
+      barrel_amount = barrel.amount,
+      total_mass = 0
+    }
+  }, gui_settings)
+  set_row_display(gui_table, row_id, barrel.prototype, barrel.amount, barrel.prototype.weight / WEIGHT_PER_KILOGRAM,
+    { "ocs-launching-calculator.converted-from-fluid" }, false, gui_settings)
+  update_fluid_row(checkbox, gui_settings)
 end
 
 ---Add header and totals rows to a recipe summary table.
@@ -494,7 +532,7 @@ local function add_sum_row(gui_table, side, amount_total, total, gui_settings)
   gui_table.add {
     type = "label",
     name = "ocs_launching_calculator_" .. side .. "_amount_sum",
-    caption = display_number(amount_total, gui_settings.decimals),
+    caption = display_number(amount_total, gui_settings.decimals, true),
     style = "label",
   }
   gui_table.add {
@@ -590,8 +628,8 @@ local function recalculate(player, selected_recipe)
     return
   end
 
-  input_amount_sum.caption = display_number(input_amount_total, decimals)
-  output_amount_sum.caption = display_number(output_amount_total, decimals)
+  input_amount_sum.caption = display_number(input_amount_total, decimals, true)
+  output_amount_sum.caption = display_number(output_amount_total, decimals, true)
   input_mass_sum.caption = display_number(input_total, decimals)
   output_mass_sum.caption = display_number(output_total, decimals)
   input_ratio_sum.caption = display_number(input_total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals)
@@ -625,18 +663,20 @@ local function recalculate(player, selected_recipe)
   local heavier_total = math.max(input_total, output_total)
   local lighter_total = math.min(input_total, output_total)
   local improvement = (heavier_total - lighter_total) / heavier_total * 100
-  local ratio = (lighter_total == 0) and "∞" or display_number(heavier_total / lighter_total, decimals)
+  local ratio = (lighter_total == 0) and "∞" or display_number(heavier_total / lighter_total, decimals, true)
   recommendation.caption = input_total < output_total
       and { "ocs-launching-calculator.recommend-inputs" }
       or { "ocs-launching-calculator.recommend-outputs" }
   detail1.visible = true
   detail2.visible = true
   detail1.caption = { "ocs-launching-calculator.recommendation-detail1", ratio }
-  detail2.caption = { "ocs-launching-calculator.recommendation-detail2", display_number(improvement, decimals) }
+  detail2.caption = { "ocs-launching-calculator.recommendation-detail2", display_number(improvement, decimals, true) }
 end
 
 local function clear_recipe_tables(player)
-  local frame = player.gui.screen[FRAME_NAME]
+  local head_frame = player.gui.screen[FRAME_NAME]
+  if not (head_frame and head_frame.valid) then return end
+  local frame = head_frame["ocs_launching_calculator_content"]
   if not (frame and frame.valid) then return end
   local gui_settings = player_gui_settings(player)
   for _, side in ipairs({ "input", "output" }) do
@@ -669,16 +709,11 @@ local function show_recipe(player, recipe_name)
   local recipe_row = selection["ocs_launching_calculator_recipe_row"]
   local recipe_picker = recipe_row and recipe_row[RECIPE_PICKER_NAME]
   local recipe_name_label = recipe_row and recipe_row["ocs_launching_calculator_recipe_name"]
-
-  log("SHOW picker valid: " .. tostring(recipe_picker and recipe_picker.valid))--debug
-  log("SHOW label valid: " .. tostring(recipe_name_label and recipe_name_label.valid)) -- debug
   if not (recipe_picker and recipe_picker.valid and recipe_name_label and recipe_name_label.valid) then
     return
   end
 
   local recipe = recipe_name and prototypes.recipe[recipe_name]
-  log("SHOW recipe_name: " .. serpent.line(recipe_name)) -- debug
-  log("SHOW prototype exists: " .. tostring(recipe ~= nil)) -- debug
   if not recipe then
     recipe_picker.elem_value = nil
     recipe_name_label.caption = { "ocs-launching-calculator.no-recipe" }
@@ -692,7 +727,6 @@ local function show_recipe(player, recipe_name)
     recipe_picker.elem_value = recipe_name
   end
   recipe_name_label.caption = recipe.localised_name
-  log("SHOW label updated for: " .. recipe.name) -- debug
 
   local input_table = get_recipe_table(mane_frame, "input")
   local output_table = get_recipe_table(mane_frame, "output")
@@ -705,10 +739,11 @@ local function show_recipe(player, recipe_name)
   add_headers(input_table, gui_settings)
   add_headers(output_table, gui_settings)
   for index, ingredient in ipairs(recipe.ingredients) do
-    add_item_row(input_table, "input", index, ingredient, ingredient.amount, gui_settings)
+    add_item_row(player, input_table, "input", index, ingredient, ingredient.amount, recipe_name, gui_settings)
   end
   for index, product in ipairs(recipe.products) do
-    add_item_row(output_table, "output", index, product, recipe.get_product_amount(index), gui_settings)
+    add_item_row(player, output_table, "output", index, product, recipe.get_product_amount(index), recipe_name,
+      gui_settings)
   end
   local input_sum_table = get_sum_table(mane_frame, "input")
   local output_sum_table = get_sum_table(mane_frame, "output")
@@ -789,6 +824,9 @@ local function create_calculator(player)
     name = MANE_NAME .. "_rocket_silo",
     direction = "horizontal",
   }
+  if not gui_settings.advanced_mode then
+    rocket_silo_frame.visible = false
+  end
   -- ---------------------------------------
   -- Silo Subframe
   local silo_frame = rocket_silo_frame.add {
@@ -829,7 +867,7 @@ local function create_calculator(player)
     type = "label",
     name = MANE_NAME .. "_silo_lift_weight",
     caption = { "ocs-launching-calculator.max-lift-weight",
-      selected_silo and display_number(selected_silo.lift_weight / 1e3, 0) .. " kg" or "—", } -- hardcoded 0 decimals
+      selected_silo and display_number(selected_silo.lift_weight / 1e3, gui_settings.decimals, true) .. " kg" or "—", }
   }
 
   -- ---------------------------------------
@@ -883,7 +921,7 @@ local function create_calculator(player)
     name = MANE_NAME .. "_rocket_recipe_tip",
     caption = {
       "ocs-launching-calculator.rocket-recipe-tip",
-      cycles > 0 and display_number(cycles, gui_settings.decimals) or "—",
+      cycles > 0 and display_number(cycles, gui_settings.decimals, true) or "—",
     },
   }
 
@@ -1001,10 +1039,6 @@ local function create_calculator(player)
   -- =======================================
   -- After building the Mane Frame
   local recipe_name = state.selected_recipe
-  -- debug start
-  log("OPEN recipe: " .. serpent.line(recipe_name))
-  log("Recipe exists: " .. tostring(recipe_name and prototypes.recipe[recipe_name] ~= nil))
-  -- debug end
   if recipe_name and prototypes.recipe[recipe_name] then
     show_recipe(player, recipe_name)
   else
@@ -1048,10 +1082,8 @@ script.on_event(defines.events.on_gui_click, function(event)
     local frame = player.gui.screen[FRAME_NAME]
     if frame then frame.destroy() else create_calculator(player) end
     return
-  elseif element.name == "ocs_launching_calculator_close" then   -- MANE close
+  elseif element.name == "ocs_launching_calculator_close" then -- MANE close
     local frame = player.gui.screen[FRAME_NAME]
-    local state = player_calculator_state(player)                --debug
-    log("CLOSE recipe: " .. serpent.line(state.selected_recipe)) --debug
     if frame then frame.destroy() end
     return
   elseif element.name == "ocs_launching_calculator_minimise" then -- MANE minimise
@@ -1104,14 +1136,7 @@ script.on_event(defines.events.on_gui_elem_changed, function(event)
   end
   local player = game.get_player(event.player_index)
   if not player then return end
-  local recipe_name = element.elem_value
-  log("before SAVE: " .. serpent.line(element.elem_value))
-  player_calculator_state(player).selected_recipe = recipe_name
-  -- debug
-  local state = player_calculator_state(player)
-  state.selected_recipe = element.elem_value
-  log("SAVE recipe: " .. serpent.line(state.selected_recipe))
-  -- debug
+  player_calculator_state(player).selected_recipe = element.elem_value -- recipe name
   show_recipe(player, element.elem_value)
 end)
 
@@ -1122,14 +1147,15 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(event)
 
   local player = game.get_player(event.player_index)
   local state = player_calculator_state(player)
-  local frame = player.gui.screen[FRAME_NAME]
+  local head_frame = player.gui.screen[FRAME_NAME]
+  if not (head_frame and head_frame.valid) then return end
+  local frame = head_frame["ocs_launching_calculator_content"]
   if not (frame and frame.valid) then return end
 
   if element.name == MANE_NAME .. "_silo_dropdown" then
     local silos = get_rocket_silos()
     local silo = silos[element.selected_index]
     if not silo then return end
-
     state.selected_silo_name = silo.name
 
     local icon = frame[MANE_NAME .. "_rocket_silo"]
@@ -1144,10 +1170,9 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(event)
     local rocket_recipes = get_rocket_recipes()
     local recipe = rocket_recipes[element.selected_index]
     if not recipe then return end
-
     state.selected_rocket_recipe_name = recipe.name
 
-    local icon                        = frame[MANE_NAME .. "_rocket_silo"]
+    local icon = frame[MANE_NAME .. "_rocket_silo"]
         [MANE_NAME .. "_rocket_frame"]
         [MANE_NAME .. "_rocket_selection"]
         [MANE_NAME .. "_rocket_icon"]
@@ -1158,20 +1183,47 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(event)
   end
 end)
 
---- Recalculate totals and recommendation when an input/output row is toggled.
+---Recalculate totals and recommendation when an input/output row is toggled.
+---Saves changes on checkboxes in the state storage
 script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   local element = event.element
   if not (element and element.valid) then return end
-  if element.name:find("^ocs_launching_calculator_input_") or element.name:find("^ocs_launching_calculator_output_") then
-    local player = game.get_player(event.player_index)
-    if element.tags.row_type == "barrelled-fluid" then
-      update_fluid_row(element, player_gui_settings(player))
+  local tags = element.tags
+  if tags.row_type ~= "item" and tags.row_type ~= "barrelled-fluid" then return end
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  local state = player_calculator_state(player)
+  local recipe_name = tags.recipe_name
+  local table_type = tags.table_type
+  local entry_name = tags.item_name or tags.fluid_name
+
+  -- Save only unchecked rows; checked is the default.
+  if recipe_name and table_type and entry_name then
+    local recipe_states = state.checkbox_states[recipe_name]
+    if element.state then
+      -- Checked: remove the saved false entry, if present.
+      if recipe_states then
+        recipe_states[table_type] = recipe_states[table_type] or {}
+        recipe_states[table_type][entry_name] = nil
+        -- Remove the recipe entry when everything is checked.
+        if next(recipe_states.inputs) == nil
+            and next(recipe_states.outputs) == nil then
+          state.checkbox_states[recipe_name] = nil
+        end
+      end
+    else
+      -- Unchecked: create storage as needed.
+      if not recipe_states then
+        recipe_states = { inputs = {}, outputs = {} }
+        state.checkbox_states[recipe_name] = recipe_states
+      end
+      recipe_states[table_type][entry_name] = false
     end
-    local frame = player.gui.screen[FRAME_NAME]
-    local selection = frame and frame["ocs_launching_calculator_selection"]
-    local recipe_row = selection and selection["ocs_launching_calculator_recipe_row"]
-    local recipe_picker = recipe_row and recipe_row[RECIPE_PICKER_NAME]
-    local recipe_name = recipe_picker and recipe_picker.elem_value
-    recalculate(game.get_player(event.player_index), recipe_name)
   end
+  -- Update barrelled-fluid row display.
+  if tags.row_type == "barrelled-fluid" then
+    update_fluid_row(element, player_gui_settings(player))
+  end
+  -- Recalculate using the recipe identified by this checkbox.
+  recalculate(player, recipe_name)
 end)

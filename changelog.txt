@@ -1,11 +1,15 @@
 ---------------------------------------------------------------------------------------------------
 Version: 0.1.0
-Date: 2026-10-13
+Date: 2026-10-18
+  Other:
+    - info.json shows 0.1.1 to distinguish older private version from active dev'ed version
   Major Features:
     - The launching calculator has a recipe picker. Ingredients and results are individually toggelable for the total sum.
     - Fluids are replaced by their barrel counterpart if possible. Toggling them shows the fluid. Fluids without a barreled version are always unchecked.
     - Recommendation: Shows how much more heaviere side has and which percentage of rocket parts could (potentially) be saved.
     - Items to heavy to lift are marked in red and a warning icon, but not by default deactivated.
     - Some items have their weight as tooltip. At least those which are defined already at the data-final-updates-stage.
+    - Picked recipe and checkbox states is saved per player.
+    - Advanced mode: Rocket silos and rocket-parts recipes can influence the max lift weight.
   Translation:
     - English and German localisation.
