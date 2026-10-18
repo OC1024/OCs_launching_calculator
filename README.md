@@ -13,3 +13,10 @@ are required.
 The lower total determines the launch recommendation. The number formatting
 setting controls displayed amounts where rounding is useful; mass values retain
 their direct runtime values.
+
+## Testing
+
+Use `/ocs-launching-calculator-reset` in the in-game chat to clear your saved
+calculator state. This removes the selected recipe, silo, rocket-parts recipe,
+window position, minimised state, and saved row selections for your player, then
+closes the calculator window if it is open.

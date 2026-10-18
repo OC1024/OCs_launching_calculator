@@ -11,5 +11,6 @@ Date: 2026-10-18
     - Some items have their weight as tooltip. At least those which are defined already at the data-final-updates-stage.
     - Picked recipe and checkbox states is saved per player.
     - Advanced mode: Rocket silos and rocket-parts recipes can influence the max lift weight.
+    - Customisable Shortcut, default: ALT+o
   Translation:
     - English and German localisation.

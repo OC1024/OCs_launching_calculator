@@ -1,6 +1,6 @@
 local mod_gui = require("mod-gui")
 
-local MANE_NAME = "ocs_launching_calculator" -- easteregg
+local MANE_NAME = "ocs_launching_calculator" -- easteregg variable name
 local FRAME_NAME = MANE_NAME .. "_frame"
 local RECIPE_PICKER_NAME = MANE_NAME .. "_recipe_picker"
 local INPUT_TABLE_NAME = MANE_NAME .. "_inputs"
@@ -12,7 +12,6 @@ local RECOMMENDATION_NAME = MANE_NAME .. "_recommendation"
 local WEIGHT_PER_KILOGRAM = 1e3 -- mass is in grams
 local WEIGHT_PER_TON = 1e6      -- mass is in grams
 local ROCKET_LIFT_WEIGHT = prototypes.utility_constants.default_rocket_lift_weight
-local rocket_capacity = ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
 
 ---Lua Things
 ---@class uint
@@ -21,8 +20,10 @@ local rocket_capacity = ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
 ---@class EventData
 ---@class ItemPrototype
 ---@class FluidPrototype
+---@class LuaRecipePrototype
 ---@class LocalisedString
 ---@class LuaGuiElement
+---@class CommandData
 
 -- ==============================================================================
 -- Helper Functions
@@ -37,7 +38,7 @@ local function display_number(value, decimals, keep_int)
   if keep_int and (value % 1 == 0) then
     decimals = 0
   elseif value ~= 0 and math.abs(value) < 1 then
-    local significant_decimals = decimals - math.floor(math.log10(math.abs(value))) - 1
+    local significant_decimals = decimals - math.floor(math.log(math.abs(value), 10)) - 1
     decimals = math.max(decimals, significant_decimals)
   end
   local formatted = string.format("%." .. decimals .. "f", value)
@@ -47,6 +48,8 @@ local function display_number(value, decimals, keep_int)
 end
 
 ---Returns GUI settings for a player.
+---@param player LuaPlayer
+---@return table gui_settings
 local function player_gui_settings(player)
   local settings       = settings.get_player_settings(player)
 
@@ -90,6 +93,9 @@ end
 ---A barrel normally has a matching fill recipe. This supports modded barrel
 ---sizes instead of assuming vanilla's 50 fluid units per barrel.
 ---Fluids without a barreled equivalent are shown with no mass and a disabled checkbox.
+---@param fluid_name string
+---@param fluid_amount number
+---@return table|nil barrel_details
 local function fluid_barrel_details(fluid_name, fluid_amount)
   local barrel_name = fluid_name .. "-barrel"
   local barrel = prototypes.item[barrel_name]
@@ -124,6 +130,8 @@ local function fluid_barrel_details(fluid_name, fluid_amount)
 end
 
 ---Returns the total quantity of included items, including barrels but excluding unbarrelled fluids.
+---@param gui_table LuaGuiElement
+---@return number total
 local function included_amount_total(gui_table)
   local total = 0
   for _, element in pairs(gui_table.children) do
@@ -141,12 +149,15 @@ end
 
 ---Returns the best recipe for a clicked item or fluid.
 ---Prefers an exact recipe-name match, otherwise requires a unique match.
+---@param item_name string
+---@param item_type string
+---@return LuaRecipePrototype|nil recipe
 local function find_unique_recipe_for_product(item_name, item_type)
   local unique_recipe = nil
   for _, recipe in pairs(prototypes.recipe) do
     -- Exclude recycling recipes.
-    local function is_recycling_recipe(recipe)
-      for _, category in pairs(recipe.categories) do
+    local function is_recycling_recipe(r)
+      for _, category in pairs(r.categories) do
         if category == "recycling" then return true end
       end
       return false
@@ -266,15 +277,17 @@ end
 -- GUI Helper Functions
 
 ---Headers for Input/Output tables
+---@param gui_table LuaGuiElement
+---@param gui_settings table
 local function add_headers(gui_table, gui_settings)
   local headers = {
     { caption = "" }, -- checkbox
-    { caption = { "ocs-launching-calculator.header-icon" } },
+    { caption = { "gui-blueprint.icon" } },
   }
 
   if gui_settings.show_item_name then
     table.insert(headers, {
-      caption = { "ocs-launching-calculator.header-item" },
+      caption = { "factoriopedia.item" },
     })
   end
 
@@ -299,6 +312,7 @@ local function add_headers(gui_table, gui_settings)
 end
 
 ---Updates a row's icon, optional item name, quantities, and mass used in aggregate calculations.
+---@param player LuaPlayer Active player
 ---@param gui_table LuaGuiElement The table containing the row.
 ---@param row_id string The row's identifier prefix.
 ---@param prototype ItemPrototype|FluidPrototype The item or fluid prototype to display.
@@ -306,8 +320,14 @@ end
 ---@param unit_mass number The mass of one unit, in kilograms.
 ---@param note LocalisedString|nil Optional tooltip note.
 ---@param is_fluid boolean Whether the displayed prototype is a fluid.
----@param gui_settings table Contains decimals, windwow size settings per player.
-local function set_row_display(gui_table, row_id, prototype, amount, unit_mass, note, is_fluid, gui_settings)
+local function set_row_display(player, gui_table, row_id, prototype, amount, unit_mass, note, is_fluid)
+  local state = player_calculator_state(player)
+  local silos = get_rocket_silos()
+  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name)
+  local rocket_capacity = selected_silo
+      and selected_silo.lift_weight / WEIGHT_PER_KILOGRAM
+      or ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
+  local gui_settings = player_gui_settings(player)
   local total_mass = amount * unit_mass
   local rocket_ratio = total_mass / rocket_capacity
   local exceeds_capacity = not is_fluid and unit_mass > rocket_capacity
@@ -384,26 +404,44 @@ local function add_row_cells(gui_table, row_id, checkbox_spec, gui_settings)
 end
 
 ---Switches a barrel-capable fluid row between its fluid and barrel displays.
-local function update_fluid_row(checkbox, gui_settings)
+---@param player LuaPlayer The player whose calculator is being updated.
+---@param checkbox LuaGuiElement The row's include checkbox, containing fluid and barrel metadata in its tags.
+local function update_fluid_row(player, checkbox)
   local gui_table = checkbox.parent
   local row_id = checkbox.name:gsub("_include$", "")
   local tags = checkbox.tags
   if checkbox.state then
     local barrel = prototypes.item[tags.barrel_name]
-    set_row_display(gui_table, row_id, barrel, tags.barrel_amount,
-      barrel.weight / WEIGHT_PER_KILOGRAM, { "ocs-launching-calculator.converted-from-fluid" }, false, gui_settings)
+    if not barrel then
+      checkbox.state = false
+      checkbox.enabled = false
+      local fluid = prototypes.fluid[tags.fluid_name]
+      set_row_display(player, gui_table, row_id, fluid, tags.fluid_amount, 0,
+        { "ocs-launching-calculator.no-barrel-note" }, true)
+      return
+    end
+    set_row_display(player, gui_table, row_id, barrel, tags.barrel_amount,
+      barrel.weight / WEIGHT_PER_KILOGRAM, { "ocs-launching-calculator.converted-from-fluid" }, false)
   else
     local fluid = prototypes.fluid[tags.fluid_name]
-    set_row_display(gui_table, row_id, fluid, tags.fluid_amount, 0,
-      { "ocs-launching-calculator.fluid-direct-note" }, true, gui_settings)
+    set_row_display(player, gui_table, row_id, fluid, tags.fluid_amount, 0,
+      { "ocs-launching-calculator.fluid-direct-note" }, true)
   end
 end
 
 ---Adds an item row or a fluid row with an optional barrel representation.
-local function add_item_row(player, gui_table, side, index, entry, amount, recipe_name, gui_settings)
+---@param player LuaPlayer Active player
+---@param gui_table LuaGuiElement The table to which the row cells are added.
+---@param side string Which side of the recipe: "input" or "output"
+---@param index any
+---@param entry table
+---@param amount number The quantity of the item or fluid.
+---@param recipe_name any
+local function add_item_row(player, gui_table, side, index, entry, amount, recipe_name)
   local row_id = "ocs_launching_calculator_" .. side .. "_" .. index
   local table_type = side == "input" and "inputs" or "outputs"
   local state = player_calculator_state(player)
+  local gui_settings = player_gui_settings(player)
   -- checkbox state (if changed before)
   local recipe_states = state.checkbox_states[recipe_name]
   local table_states = recipe_states and recipe_states[table_type]
@@ -426,7 +464,7 @@ local function add_item_row(player, gui_table, side, index, entry, amount, recip
         total_mass = amount * unit_mass,
       }
     }, gui_settings)
-    set_row_display(gui_table, row_id, prototype, amount, unit_mass, nil, false, gui_settings)
+    set_row_display(player, gui_table, row_id, prototype, amount, unit_mass, nil, false)
     return
   end
 
@@ -445,11 +483,11 @@ local function add_item_row(player, gui_table, side, index, entry, amount, recip
         recipe_name = recipe_name,
         table_type = table_type,
         fluid_name = entry.name,
+        fluid_amount = amount,
         total_mass = 0,
       }
     }, gui_settings)
-    set_row_display(gui_table, row_id, fluid, amount, 0, { "ocs-launching-calculator.no-barrel-note" }, true,
-      gui_settings)
+    set_row_display(player, gui_table, row_id, fluid, amount, 0, { "ocs-launching-calculator.no-barrel-note" }, true)
     return
   end
 
@@ -470,9 +508,10 @@ local function add_item_row(player, gui_table, side, index, entry, amount, recip
       total_mass = 0
     }
   }, gui_settings)
-  set_row_display(gui_table, row_id, barrel.prototype, barrel.amount, barrel.prototype.weight / WEIGHT_PER_KILOGRAM,
-    { "ocs-launching-calculator.converted-from-fluid" }, false, gui_settings)
-  update_fluid_row(checkbox, gui_settings)
+  set_row_display(player, gui_table, row_id, barrel.prototype, barrel.amount,
+    barrel.prototype.weight / WEIGHT_PER_KILOGRAM,
+    { "ocs-launching-calculator.converted-from-fluid" }, false)
+  update_fluid_row(player, checkbox)
 end
 
 ---Add header and totals rows to a recipe summary table.
@@ -483,11 +522,7 @@ end
 ---@param gui_settings table
 ---@return nil
 local function add_sum_row(gui_table, side, amount_total, total, gui_settings)
-  local type_caption = {
-    side == "input"
-    and "ocs-launching-calculator.sum-inputs"
-    or "ocs-launching-calculator.sum-outputs"
-  }
+  local type_caption = { side == "input" and "description.ingredients" or "description.products" }
 
   -- Header row
   gui_table.add {
@@ -549,6 +584,9 @@ local function add_sum_row(gui_table, side, amount_total, total, gui_settings)
   }
 end
 
+---Returns the total mass of checked rows in a recipe table.
+---@param gui_table LuaGuiElement
+---@return number total
 local function included_total(gui_table)
   local total = 0
   for _, child in pairs(gui_table.children) do
@@ -562,7 +600,10 @@ end
 -- ==============================================================================
 -- GUI Functions
 
----Standard Recipe Frame
+---Returns the input or output table in the calculator frame.
+---@param frame LuaGuiElement
+---@param side "input"|"output"
+---@return LuaGuiElement|nil gui_table
 local function get_recipe_table(frame, side)
   if not (frame and frame.valid) then return end
   local io_body = frame["ocs_launching_calculator_io_body"]
@@ -582,24 +623,70 @@ local function get_recipe_table(frame, side)
   return column[table_name]
 end
 
+---Refreshes existing input and output rows using the player's currently selected rocket silo.
+---@param player LuaPlayer The player whose calculator is being updated.
+---@param frame LuaGuiElement The calculator content frame containing the recipe tables.
+local function refresh_recipe_rows(player, frame)
+  for _, side in ipairs({ "input", "output" }) do
+    local gui_table = get_recipe_table(frame, side)
+    if not (gui_table and gui_table.valid) then
+      goto continue
+    end
+    for _, checkbox in pairs(gui_table.children) do
+      if checkbox.valid
+          and checkbox.type == "checkbox"
+          and checkbox.name:match("_include$") then
+        local tags = checkbox.tags
+        if tags.row_type == "item" then
+          local prototype = prototypes.item[tags.item_name]
+          if prototype then
+            local amount = tags.amount
+            local unit_mass = prototype.weight / WEIGHT_PER_KILOGRAM
+            local row_id = checkbox.name:gsub("_include$", "")
+            set_row_display(player, gui_table, row_id, prototype, amount, unit_mass, nil, false)
+          end
+        elseif tags.row_type == "barrelled-fluid" or tags.row_type == "unbarrelled-fluid" then
+          update_fluid_row(player, checkbox)
+        end
+      end
+    end
+    ::continue::
+  end
+end
+
 ---Returns the dedicated sum table so both sides always share one baseline.
+---@param frame LuaGuiElement
+---@param side "input"|"output"
+---@return LuaGuiElement|nil sum_table
 local function get_sum_table(frame, side)
   local sums_flow = frame["ocs_launching_calculator_sums"]
   if not (sums_flow and sums_flow.valid) then return nil end
   return sums_flow[side == "input" and INPUT_SUM_TABLE_NAME or OUTPUT_SUM_TABLE_NAME]
 end
 
----Filling tables for inputs/outputs/summs and display recommendation
+---Recalculates all numbers, filling tables for inputs/outputs/summs and display recommendation.
+---@param player LuaPlayer The player whose calculator is being updated.
+---@param selected_recipe string|nil The currently selected recipe name.
 local function recalculate(player, selected_recipe)
   local head_frame = player.gui.screen[FRAME_NAME]
   if not (head_frame and head_frame.valid) then return end
   local frame = head_frame["ocs_launching_calculator_content"]
   if not (frame and frame.valid) then return end
+  -- Rocket silos and parts
+  local state = player_calculator_state(player)
+  local silos = get_rocket_silos()
+  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name)
+  local rocket_capacity = selected_silo
+      and selected_silo.lift_weight / WEIGHT_PER_KILOGRAM
+      or ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
+  -- IO-tables
   local input_table = get_recipe_table(frame, "input")
   local output_table = get_recipe_table(frame, "output")
   if not (input_table and input_table.valid and output_table and output_table.valid) then
     return
   end
+  -- refresh rows (needed for rocket silo update)
+  refresh_recipe_rows(player, frame)
 
   local gui_settings = player_gui_settings(player)
   local decimals = gui_settings.decimals
@@ -632,8 +719,8 @@ local function recalculate(player, selected_recipe)
   output_amount_sum.caption = display_number(output_amount_total, decimals, true)
   input_mass_sum.caption = display_number(input_total, decimals)
   output_mass_sum.caption = display_number(output_total, decimals)
-  input_ratio_sum.caption = display_number(input_total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals)
-  output_ratio_sum.caption = display_number(output_total / (ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM), decimals)
+  input_ratio_sum.caption = display_number(input_total / rocket_capacity, decimals)
+  output_ratio_sum.caption = display_number(output_total / rocket_capacity, decimals)
 
   local recommendation = frame[RECOMMENDATION_NAME]
   local detail1 = frame["ocs_launching_calculator_recommendation_detail1"]
@@ -673,6 +760,8 @@ local function recalculate(player, selected_recipe)
   detail2.caption = { "ocs-launching-calculator.recommendation-detail2", display_number(improvement, decimals, true) }
 end
 
+---Clears both recipe tables and resets their totals and recommendation.
+---@param player LuaPlayer
 local function clear_recipe_tables(player)
   local head_frame = player.gui.screen[FRAME_NAME]
   if not (head_frame and head_frame.valid) then return end
@@ -693,7 +782,7 @@ local function clear_recipe_tables(player)
   frame[RECOMMENDATION_NAME].caption = { "ocs-launching-calculator.select-recipe" }
 end
 
----Recipe Picker Frame
+---Shows a recipe and rebuilds its input and output rows.
 ---@param player LuaPlayer
 ---@param recipe_name string|nil
 local function show_recipe(player, recipe_name)
@@ -716,7 +805,7 @@ local function show_recipe(player, recipe_name)
   local recipe = recipe_name and prototypes.recipe[recipe_name]
   if not recipe then
     recipe_picker.elem_value = nil
-    recipe_name_label.caption = { "ocs-launching-calculator.no-recipe" }
+    recipe_name_label.caption = { "gui-assembling-machine.no-recipe-set" }
     clear_recipe_tables(player)
     recalculate(player, nil)
     return
@@ -739,11 +828,10 @@ local function show_recipe(player, recipe_name)
   add_headers(input_table, gui_settings)
   add_headers(output_table, gui_settings)
   for index, ingredient in ipairs(recipe.ingredients) do
-    add_item_row(player, input_table, "input", index, ingredient, ingredient.amount, recipe_name, gui_settings)
+    add_item_row(player, input_table, "input", index, ingredient, ingredient.amount, recipe_name)
   end
   for index, product in ipairs(recipe.products) do
-    add_item_row(player, output_table, "output", index, product, recipe.get_product_amount(index), recipe_name,
-      gui_settings)
+    add_item_row(player, output_table, "output", index, product, recipe.get_product_amount(index), recipe_name)
   end
   local input_sum_table = get_sum_table(mane_frame, "input")
   local output_sum_table = get_sum_table(mane_frame, "output")
@@ -759,7 +847,9 @@ local function show_recipe(player, recipe_name)
 end
 
 -- ------------------------------------------------------------------------------
----GUI Main Frame
+
+---Creates the calculator window for a player.
+---@param player LuaPlayer
 local function create_calculator(player)
   local old_frame = player.gui.screen[FRAME_NAME]
   if old_frame then old_frame.destroy() end
@@ -774,6 +864,7 @@ local function create_calculator(player)
     head_frame.auto_center = true
   end
   head_frame.style.width = gui_settings.window_width
+  player.opened = head_frame
 
   -- =======================================
   -- Titlebar
@@ -804,9 +895,7 @@ local function create_calculator(player)
     name = "ocs_launching_calculator_minimise",
     sprite = state.is_minimised and "utility/expand" or "utility/collapse",
     style = "frame_action_button",
-    tooltip = state.is_minimised
-        and { "ocs-launching-calculator.restore" }
-        or { "ocs-launching-calculator.minimise" }
+    tooltip = state.is_minimised and { "gui-crafting-queue.expand" } or { "gui-crafting-queue.collapse" }
   }
   -- Close Button
   titlebar.add {
@@ -814,7 +903,7 @@ local function create_calculator(player)
     name = "ocs_launching_calculator_close",
     sprite = "utility/close",
     style = "frame_action_button",
-    tooltip = { "ocs-launching-calculator.close" }
+    tooltip = { "gui.close-instruction" }
   }
 
   -- =======================================
@@ -882,7 +971,10 @@ local function create_calculator(player)
   rocket_frame.add { type = "label", caption = { "ocs-launching-calculator.rocket-types" }, style = "heading_2_label" }
   local rocket_recipes = get_rocket_recipes()
   local r_items, recipe_index, selected_r_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name)
-  -- Rocket recipe selection row
+  if selected_r_recipe then
+    state.selected_rocket_recipe_name = selected_r_recipe.name
+  end
+  -- Rocket-parts selection row (icon + dropdown)
   local rocket_selection = rocket_frame.add {
     type = "flow",
     name = MANE_NAME .. "_rocket_selection",
@@ -894,7 +986,7 @@ local function create_calculator(player)
     name = MANE_NAME .. "_rocket_icon",
     sprite = selected_r_recipe and selected_r_recipe.sprite or "item/rocket-part",
   }
-  -- Rocket-recipe dropdown
+  -- Rocket-parts dropdown
   rocket_selection.add {
     type = "drop-down",
     name = MANE_NAME .. "_rocket_dropdown",
@@ -902,7 +994,7 @@ local function create_calculator(player)
     selected_index = recipe_index,
     enabled = #r_items > 0,
   }
-  -- Rocket recipe cycles required
+  -- Rocket-parts cycles required
   local parts_per_cycle = 0
   if selected_r_recipe then
     for _, product in pairs(selected_r_recipe.products or {}) do
@@ -941,9 +1033,9 @@ local function create_calculator(player)
     name = MANE_NAME .. "_recipe_row",
     direction = "horizontal"
   }
-  recipe_row.add { type = "label", caption = { "ocs-launching-calculator.recipe" } }
+  recipe_row.add { type = "label", caption = { "description.recipe" } }
   recipe_row.add { type = "choose-elem-button", name = RECIPE_PICKER_NAME, elem_type = "recipe" }
-  recipe_row.add { type = "label", name = "ocs_launching_calculator_recipe_name", caption = { "ocs-launching-calculator.no-recipe" } }
+  recipe_row.add { type = "label", name = "ocs_launching_calculator_recipe_name", caption = { "gui-assembling-machine.no-recipe-set" } }
   -- info line
   selection.add { type = "label", caption = { "ocs-launching-calculator.click-to-select-recipe" } }
 
@@ -965,7 +1057,7 @@ local function create_calculator(player)
     direction = "vertical",
     style = "inside_shallow_frame_with_padding"
   }
-  input_column.add { type = "label", caption = { "ocs-launching-calculator.inputs" }, style = "heading_2_label" }
+  input_column.add { type = "label", caption = { "description.ingredients" }, style = "heading_2_label" }
   input_column.style.width = gui_settings.column_width
   local input_table = input_column.add {
     type = "table",
@@ -982,7 +1074,7 @@ local function create_calculator(player)
     direction = "vertical",
     style = "inside_shallow_frame_with_padding"
   }
-  output_column.add { type = "label", caption = { "ocs-launching-calculator.outputs" }, style = "heading_2_label" }
+  output_column.add { type = "label", caption = { "description.products" }, style = "heading_2_label" }
   output_column.style.width = gui_settings.column_width
   local output_table = output_column.add {
     type = "table",
@@ -1044,10 +1136,10 @@ local function create_calculator(player)
   else
     show_recipe(player, nil)
   end
-  -- clear_recipe_tables(player) --clearing the user inputs
 end
 
----Main button (top left corner)
+---Creates the mod-GUI button for a player if it does not exist yet.
+---@param player LuaPlayer
 local function create_main_button(player)
   local flow = mod_gui.get_button_flow(player)
   if flow.ocs_launching_calculator_button then return end
@@ -1060,20 +1152,68 @@ end
 -- ==============================================================================
 -- Scripts
 
---Create main button
+---Creates main buttons when the mod is initialized.
 script.on_init(function()
   for _, player in pairs(game.players) do create_main_button(player) end
 end)
 
+---Creates main buttons after a mod configuration change.
+---@param event EventData
 script.on_configuration_changed(function()
   for _, player in pairs(game.players) do create_main_button(player) end
 end)
 
+---Resets the invoking player's saved calculator state for testing.
+---@param command CommandData
+commands.add_command("ocs-launching-calculator-reset", "Reset your calculator state for testing.", function(command)
+  if not command.player_index then
+    log("The ocs-launching-calculator-reset command must be run by a player.")
+    return
+  end
+
+  storage.calculator_state = storage.calculator_state or {}
+  storage.calculator_state[command.player_index] = nil
+
+  local player = game.get_player(command.player_index)
+  if not player then return end
+  local frame = player.gui.screen[FRAME_NAME]
+  if frame and frame.valid then frame.destroy() end
+  player.print({ "ocs-launching-calculator.storage-reset" })
+end)
+
+---Creates the main button for a newly created player.
+---@param event EventData
 script.on_event(defines.events.on_player_created, function(event)
   create_main_button(game.get_player(event.player_index))
 end)
 
+---Closes the calculator when its frame is closed with the standard GUI controls.
+---@param event EventData
+script.on_event(defines.events.on_gui_closed, function(event)
+  local player = game.get_player(event.player_index)
+  if not player then return end
+
+  local element = event.element
+  if element and element.valid and element.name == FRAME_NAME then
+    element.destroy()
+  end
+end)
+
+---Toggle main window
+---@param event EventData
+script.on_event("ocs-launching-calculator-toggle", function(event)
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  local frame = player.gui.screen[FRAME_NAME]
+  if frame and frame.valid then
+    frame.destroy()
+  else
+    create_calculator(player)
+  end
+end)
+
 ---Handle calculator open/close clicks and recipe selection via item icons.
+---@param event EventData
 script.on_event(defines.events.on_gui_click, function(event)
   local player = game.get_player(event.player_index)
   local element = event.element
@@ -1099,8 +1239,8 @@ script.on_event(defines.events.on_gui_click, function(event)
           and "utility/expand"
           or "utility/collapse"
       element.tooltip = state.is_minimised
-          and { "ocs-launching-calculator.restore" }
-          or { "ocs-launching-calculator.minimise" }
+          and { "gui-crafting-queue.expand" }
+          or { "gui-crafting-queue.collapse" }
     end
     return
   end
@@ -1116,7 +1256,8 @@ script.on_event(defines.events.on_gui_click, function(event)
   end
 end)
 
---Save and Update Window position
+---Saves the calculator window position after it is moved.
+---@param event EventData
 script.on_event(defines.events.on_gui_location_changed, function(event)
   local element = event.element
   if not (element and element.valid and element.name == FRAME_NAME) then
@@ -1128,7 +1269,7 @@ script.on_event(defines.events.on_gui_location_changed, function(event)
 end)
 
 ---Update the calculator when player changes the recipe picker
---- @param event EventData
+---@param event EventData
 script.on_event(defines.events.on_gui_elem_changed, function(event)
   local element = event.element
   if not (element and element.valid and element.name == RECIPE_PICKER_NAME) then
@@ -1141,11 +1282,13 @@ script.on_event(defines.events.on_gui_elem_changed, function(event)
 end)
 
 ---Handle changes to the selected silo or rocket recipe.
+---@param event EventData
 script.on_event(defines.events.on_gui_selection_state_changed, function(event)
   local element = event.element
   if not (element and element.valid) then return end
 
   local player = game.get_player(event.player_index)
+  local gui_settings = player_gui_settings(player)
   local state = player_calculator_state(player)
   local head_frame = player.gui.screen[FRAME_NAME]
   if not (head_frame and head_frame.valid) then return end
@@ -1166,6 +1309,41 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(event)
     if icon and icon.valid then
       icon.sprite = silo.sprite
     end
+    local lift_weight_label = frame[MANE_NAME .. "_rocket_silo"]
+        [MANE_NAME .. "_silo_frame"]
+        [MANE_NAME .. "_silo_lift_weight"]
+
+    if lift_weight_label and lift_weight_label.valid then
+      lift_weight_label.caption = { "ocs-launching-calculator.max-lift-weight",
+        display_number(silo.lift_weight / 1e3, gui_settings.decimals, true) .. " kg", }
+    end
+
+    -- Update required rocket-part recipe cycles
+    local rocket_frame = frame[MANE_NAME .. "_rocket_silo"][MANE_NAME .. "_rocket_frame"]
+    local cycles_label = rocket_frame and rocket_frame[MANE_NAME .. "_rocket_recipe_tip"]
+    if cycles_label and cycles_label.valid then
+      local rocket_recipes = get_rocket_recipes()
+      local _, _, selected_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name)
+      local parts_per_cycle = 0
+      local cycles = 0
+      if selected_recipe then
+        for _, product in pairs(selected_recipe.products or {}) do
+          if product.name == "rocket-part" then
+            parts_per_cycle = product.amount or product.amount_max or 0
+            break
+          end
+        end
+      end
+      if silo.rocket_parts_required and parts_per_cycle > 0 then
+        cycles = math.ceil(silo.rocket_parts_required / parts_per_cycle)
+      end
+      cycles_label.caption = {
+        "ocs-launching-calculator.rocket-recipe-tip",
+        cycles > 0 and display_number(cycles, gui_settings.decimals, true) or "—",
+      }
+    end
+    -- Recalculate item ratios and recommendation for the new silo.
+    recalculate(player, state.selected_recipe)
   elseif element.name == MANE_NAME .. "_rocket_dropdown" then
     local rocket_recipes = get_rocket_recipes()
     local recipe = rocket_recipes[element.selected_index]
@@ -1184,7 +1362,8 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(event)
 end)
 
 ---Recalculate totals and recommendation when an input/output row is toggled.
----Saves changes on checkboxes in the state storage
+---Saves changes on checkboxes in the state storage.
+---@param event EventData
 script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   local element = event.element
   if not (element and element.valid) then return end
@@ -1222,7 +1401,7 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   end
   -- Update barrelled-fluid row display.
   if tags.row_type == "barrelled-fluid" then
-    update_fluid_row(element, player_gui_settings(player))
+    update_fluid_row(player, element)
   end
   -- Recalculate using the recipe identified by this checkbox.
   recalculate(player, recipe_name)
