@@ -8,6 +8,8 @@ local OUTPUT_TABLE_NAME = MANE_NAME .. "_outputs"
 local INPUT_SUM_TABLE_NAME = MANE_NAME .. "_input_sum_table"
 local OUTPUT_SUM_TABLE_NAME = MANE_NAME .. "_output_sum_table"
 local RECOMMENDATION_NAME = MANE_NAME .. "_recommendation"
+local vanilla_silo = "rocket-silo"
+local vanilla_r_part = "rocket-part"
 
 local WEIGHT_PER_KILOGRAM = 1e3 -- mass is in grams
 local WEIGHT_PER_TON = 1e6      -- mass is in grams
@@ -209,7 +211,9 @@ local function get_rocket_silos()
     local has_rocket_building_category =
         prototype.crafting_categories
         and prototype.crafting_categories["rocket-building"]
-    if is_rocket_silo or has_rocket_building_category then
+    if (is_rocket_silo or has_rocket_building_category)
+        and prototype.lift_weight
+        and prototype.lift_weight > 0 then
       silos[#silos + 1] = {
         name = name,
         localised_name = prototype.localised_name,
@@ -251,7 +255,7 @@ end
 ---@return string[] items
 ---@return integer selected_index
 ---@return table? selected_entry
-local function prepare_selection(entries, selected_name)
+local function prepare_selection(entries, selected_name, default_name)
   local items = {}
   local selected_index = 0
   local selected_entry = nil
@@ -265,6 +269,17 @@ local function prepare_selection(entries, selected_name)
     end
   end
 
+  -- default path
+  if not selected_entry and default_name then
+    for i, entry in ipairs(entries) do
+      if entry.name == default_name then
+        selected_index = i
+        selected_entry = entry
+        break
+      end
+    end
+  end
+  -- if also no default name (or missing)
   if not selected_entry and #entries > 0 then
     selected_index = 1
     selected_entry = entries[1]
@@ -323,7 +338,7 @@ end
 local function set_row_display(player, gui_table, row_id, prototype, amount, unit_mass, note, is_fluid)
   local state = player_calculator_state(player)
   local silos = get_rocket_silos()
-  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name)
+  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name, vanilla_silo)
   local rocket_capacity = selected_silo
       and selected_silo.lift_weight / WEIGHT_PER_KILOGRAM
       or ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
@@ -675,7 +690,7 @@ local function recalculate(player, selected_recipe)
   -- Rocket silos and parts
   local state = player_calculator_state(player)
   local silos = get_rocket_silos()
-  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name)
+  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name, vanilla_silo)
   local rocket_capacity = selected_silo
       and selected_silo.lift_weight / WEIGHT_PER_KILOGRAM
       or ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
@@ -933,7 +948,7 @@ local function create_calculator(player)
     direction = "horizontal",
   }
   local silos = get_rocket_silos()
-  local silo_items, silo_index, selected_silo = prepare_selection(silos, state.selected_silo_name)
+  local silo_items, silo_index, selected_silo = prepare_selection(silos, state.selected_silo_name, vanilla_silo)
   if selected_silo then
     state.selected_silo_name = selected_silo.name
   end
@@ -970,7 +985,8 @@ local function create_calculator(player)
   rocket_frame.style.width = gui_settings.column_width
   rocket_frame.add { type = "label", caption = { "ocs-launching-calculator.rocket-types" }, style = "heading_2_label" }
   local rocket_recipes = get_rocket_recipes()
-  local r_items, recipe_index, selected_r_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name)
+  local r_items, recipe_index, selected_r_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name,
+    vanilla_r_part)
   if selected_r_recipe then
     state.selected_rocket_recipe_name = selected_r_recipe.name
   end
@@ -1128,6 +1144,7 @@ local function create_calculator(player)
     style = "label",
     visible = false,
   }
+
   -- =======================================
   -- After building the Mane Frame
   local recipe_name = state.selected_recipe
@@ -1144,8 +1161,11 @@ local function create_main_button(player)
   local flow = mod_gui.get_button_flow(player)
   if flow.ocs_launching_calculator_button then return end
   flow.add {
-    type = "sprite-button", name = "ocs_launching_calculator_button", sprite = "item/rocket-part",
-    tooltip = { "ocs-launching-calculator.title" }, style = mod_gui.button_style
+    type = "sprite-button",
+    name = "ocs_launching_calculator_button",
+    sprite = "item/rocket-part",
+    tooltip = { "ocs-launching-calculator.title" },
+    style = "slot_button",
   }
 end
 
@@ -1323,7 +1343,7 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(event)
     local cycles_label = rocket_frame and rocket_frame[MANE_NAME .. "_rocket_recipe_tip"]
     if cycles_label and cycles_label.valid then
       local rocket_recipes = get_rocket_recipes()
-      local _, _, selected_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name)
+      local _, _, selected_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name, vanilla_r_part)
       local parts_per_cycle = 0
       local cycles = 0
       if selected_recipe then
