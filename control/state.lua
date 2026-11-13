@@ -47,12 +47,33 @@ function M.player_calculator_state(player)
       selected_rocket_recipe_name = nil,
       window_location = nil,
       is_minimised = false,
+      history_visible = false,
+      recipe_history = {},
       checkbox_states = {},
     }
     storage.calculator_state[player.index] = state
   end
   state.checkbox_states = state.checkbox_states or {}
+  state.recipe_history = state.recipe_history or {}
+  if state.history_visible == nil then state.history_visible = false end
   return state
+end
+
+---Adds a recipe to the front of the player's recent recipe history.
+---@param player LuaPlayer
+---@param recipe_name string
+function M.record_recipe_history(player, recipe_name)
+  local player_state = M.player_calculator_state(player)
+  local history = player_state.recipe_history
+  for index = #history, 1, -1 do
+    if history[index] == recipe_name then
+      table.remove(history, index)
+    end
+  end
+  table.insert(history, 1, recipe_name)
+  while #history > 5 do
+    table.remove(history)
+  end
 end
 
 return M

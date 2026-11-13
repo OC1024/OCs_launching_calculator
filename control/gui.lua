@@ -1,7 +1,7 @@
 local mod_gui = require("mod-gui")
 local gui = {}
 local state = require("control.state")
-local calc = require("control.helpers")
+local helpers = require("control.helpers")
 local C = state.constants
 
 local MANE_NAME = C.mod_name
@@ -16,17 +16,20 @@ local vanilla_silo = C.vanilla_silo
 local vanilla_r_part = C.vanilla_rocket_part
 local WEIGHT_PER_KILOGRAM = C.weight_per_kilogram
 local ROCKET_LIFT_WEIGHT = C.rocket_lift_weight
+local HISTORY_FRAME_NAME = MANE_NAME .. "_history"
+local HISTORY_CONTENT_FRAME_NAME = HISTORY_FRAME_NAME.."_content"
+local HISTORY_TOGGLE_NAME = MANE_NAME .. "_history_toggle"
+local HISTORY_SLOT_PREFIX = MANE_NAME .. "_history_slot_"
+local HISTORY_SLOT_COUNT = 5
+local HISTORY_FRAME_WIDTH = 88
+local HISTORY_FRAME_GAP_HORIZONTAL = 0
+local HISTORY_FRAME_GAP_VERTICAL = 0
 
-local display_number = calc.display_number
-local fluid_barrel_details = calc.fluid_barrel_details
-local get_rocket_silos = calc.get_rocket_silos
-local get_rocket_recipes = calc.get_rocket_recipes
-local prepare_selection = calc.prepare_selection
-local included_amount_total = calc.included_amount_total
-local player_gui_settings = state.player_gui_settings
-local player_calculator_state = state.player_calculator_state
+local display_number = helpers.display_number
 
-
+---Headers for Input/Output tables
+---@param gui_table LuaGuiElement
+---@param gui_settings table
 local function add_headers(gui_table, gui_settings)
   local headers = {
     { caption = "" }, -- checkbox
@@ -69,13 +72,14 @@ end
 ---@param note LocalisedString|nil Optional tooltip note.
 ---@param is_fluid boolean Whether the displayed prototype is a fluid.
 local function set_row_display(player, gui_table, row_id, prototype, amount, unit_mass, note, is_fluid)
-  local state = player_calculator_state(player)
-  local silos = get_rocket_silos()
-  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name, vanilla_silo)
+  -- General settings
+  local gui_settings = state.player_gui_settings(player)
+  local state = state.player_calculator_state(player)
+  local silos = helpers.get_rocket_silos()
+  local _, _, selected_silo = helpers.prepare_selection(silos, state.selected_silo_name, vanilla_silo)
   local rocket_capacity = selected_silo
       and selected_silo.lift_weight / WEIGHT_PER_KILOGRAM
       or ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
-  local gui_settings = player_gui_settings(player)
   local total_mass = amount * unit_mass
   local rocket_ratio = total_mass / rocket_capacity
   local exceeds_capacity = not is_fluid and unit_mass > rocket_capacity
@@ -188,8 +192,8 @@ end
 local function add_item_row(player, gui_table, side, index, entry, amount, recipe_name)
   local row_id = "ocs_launching_calculator_" .. side .. "_" .. index
   local table_type = side == "input" and "inputs" or "outputs"
-  local state = player_calculator_state(player)
-  local gui_settings = player_gui_settings(player)
+  local gui_settings = state.player_gui_settings(player)
+  local state = state.player_calculator_state(player)
   -- checkbox state (if changed before)
   local recipe_states = state.checkbox_states[recipe_name]
   local table_states = recipe_states and recipe_states[table_type]
@@ -218,7 +222,7 @@ local function add_item_row(player, gui_table, side, index, entry, amount, recip
 
   -- if barreled
   local fluid = prototypes.fluid[entry.name]
-  local barrel = fluid_barrel_details(entry.name, amount)
+  local barrel = helpers.fluid_barrel_details(entry.name, amount)
   if not barrel then
     add_row_cells(gui_table, row_id, {
       type = "checkbox",
@@ -420,10 +424,12 @@ function gui.recalculate(player, selected_recipe)
   if not (head_frame and head_frame.valid) then return end
   local frame = head_frame["ocs_launching_calculator_content"]
   if not (frame and frame.valid) then return end
+  -- general gui and state settings
+  local gui_settings = state.player_gui_settings(player)
+  local state = state.player_calculator_state(player)
   -- Rocket silos and parts
-  local state = player_calculator_state(player)
-  local silos = get_rocket_silos()
-  local _, _, selected_silo = prepare_selection(silos, state.selected_silo_name, vanilla_silo)
+  local silos = helpers.get_rocket_silos()
+  local _, _, selected_silo = helpers.prepare_selection(silos, state.selected_silo_name, vanilla_silo)
   local rocket_capacity = selected_silo
       and selected_silo.lift_weight / WEIGHT_PER_KILOGRAM
       or ROCKET_LIFT_WEIGHT / WEIGHT_PER_KILOGRAM
@@ -436,12 +442,11 @@ function gui.recalculate(player, selected_recipe)
   -- refresh rows (needed for rocket silo update)
   refresh_recipe_rows(player, frame)
 
-  local gui_settings = player_gui_settings(player)
   local decimals = gui_settings.decimals
   local input_total = included_total(input_table)
   local output_total = included_total(output_table)
-  local input_amount_total = included_amount_total(input_table)
-  local output_amount_total = included_amount_total(output_table)
+  local input_amount_total = helpers.included_amount_total(input_table)
+  local output_amount_total = helpers.included_amount_total(output_table)
   local input_sum_table = get_sum_table(frame, "input")
   local output_sum_table = get_sum_table(frame, "output")
   local input_mass_sum = input_sum_table and input_sum_table["ocs_launching_calculator_input_mass_sum"]
@@ -515,7 +520,7 @@ local function clear_recipe_tables(player)
   if not (head_frame and head_frame.valid) then return end
   local frame = head_frame["ocs_launching_calculator_content"]
   if not (frame and frame.valid) then return end
-  local gui_settings = player_gui_settings(player)
+  local gui_settings = state.player_gui_settings(player)
   for _, side in ipairs({ "input", "output" }) do
     local gui_table = get_recipe_table(frame, side)
     if not (gui_table and gui_table.valid) then return end
@@ -538,7 +543,7 @@ function gui.show_recipe(player, recipe_name)
   if not (head_frame and head_frame.valid) then return end
   local mane_frame = head_frame["ocs_launching_calculator_content"]
   if not (mane_frame and mane_frame.valid) then return end
-  local gui_settings = player_gui_settings(player)
+  local gui_settings = state.player_gui_settings(player)
 
   -- Update recipe picker when a recipe is selected by clicking an item.
   local selection = mane_frame["ocs_launching_calculator_selection"]
@@ -558,7 +563,7 @@ function gui.show_recipe(player, recipe_name)
     gui.recalculate(player, nil)
     return
   end
-  local state = player_calculator_state(player)
+  local state = state.player_calculator_state(player)
   state.selected_recipe = recipe_name
   if recipe_picker.elem_value ~= recipe_name then
     recipe_picker.elem_value = recipe_name
@@ -594,6 +599,111 @@ function gui.show_recipe(player, recipe_name)
   gui.recalculate(player, recipe_name)
 end
 
+---Refreshes the recent-recipe history panel.
+---@param player LuaPlayer
+local function refresh_history(player)
+  local player_state = state.player_calculator_state(player)
+  local history_frame = player.gui.screen[HISTORY_FRAME_NAME]
+  if not (history_frame and history_frame.valid) then return end
+  local content_frame = history_frame[HISTORY_CONTENT_FRAME_NAME]
+  if not (content_frame and content_frame.valid) then return end
+  content_frame.clear()
+  -- Recipe slots
+  for index = 1, HISTORY_SLOT_COUNT do
+    local recipe_name = player_state.recipe_history[index]
+    local recipe = recipe_name and prototypes.recipe[recipe_name]
+    content_frame.add {
+      type = "sprite-button",
+      name = HISTORY_SLOT_PREFIX .. index,
+      sprite = recipe and "recipe/" .. recipe.name or nil, -- "utility/slot",
+      tooltip = recipe and recipe.localised_name or nil,
+      enabled = recipe ~= nil,
+      style = "slot_button",
+      tags = recipe and {
+        action = "select-history-recipe",
+        recipe_name = recipe.name,
+      } or {},
+    }
+  end
+end
+
+---Positions the history panel immediately to the left of the calculator.
+---@param player LuaPlayer
+function gui.update_history_position(player)
+  local head_frame = player.gui.screen[FRAME_NAME]
+  local history_frame = player.gui.screen[HISTORY_FRAME_NAME]
+  if not (head_frame and head_frame.valid and history_frame and history_frame.valid) then return end
+  local location = head_frame.location
+  if location then
+    history_frame.location = {
+      x = location.x - HISTORY_FRAME_WIDTH - HISTORY_FRAME_GAP_HORIZONTAL,
+      y = location.y + HISTORY_FRAME_GAP_VERTICAL,
+    }
+  end
+end
+
+---Creates the history panel when it is enabled for the player.
+---@param player LuaPlayer
+function gui.create_history(player)
+  local old_history = player.gui.screen[HISTORY_FRAME_NAME]
+  if old_history then old_history.destroy() end
+  local player_state = state.player_calculator_state(player)
+  if not player_state.history_visible then return end
+  -- History Root Frame
+  local history_frame = player.gui.screen.add { type = "frame", name = HISTORY_FRAME_NAME, direction = "vertical", }
+  history_frame.style.width = HISTORY_FRAME_WIDTH
+  -- Titlebar
+  local titlebar = history_frame.add { type = "flow", direction = "horizontal", }
+  titlebar.style.horizontally_stretchable = true -- needed?
+  titlebar.add {
+    type = "sprite",
+    sprite = "utility/mod_last_updated",
+    tooltip = { "ocs-launching-calculator.history" },
+  }
+  -- Content
+  history_frame.add {
+    type = "frame",
+    name = HISTORY_CONTENT_FRAME_NAME,
+    direction = "vertical",
+    style = "inside_shallow_frame_with_padding",
+  }
+  refresh_history(player)
+  gui.update_history_position(player)
+end
+
+---Toggles visibility of the recent-recipe history panel.
+---@param player LuaPlayer
+---@param button LuaGuiElement
+function gui.toggle_history(player, button)
+  local player_state = state.player_calculator_state(player)
+  player_state.history_visible = not player_state.history_visible
+  gui.create_history(player)
+  button.sprite = player_state.history_visible and "utility/forward_arrow" or "utility/backward_arrow"
+  button.tooltip = player_state.history_visible
+      and { "ocs-launching-calculator.hide-history" }
+      or { "ocs-launching-calculator.show-history" }
+end
+
+---Destroys the calculator and its attached history panel.
+---@param player LuaPlayer
+function gui.destroy_calculator(player)
+  local frame = player.gui.screen[FRAME_NAME]
+  if frame then frame.destroy() end
+  local history_frame = player.gui.screen[HISTORY_FRAME_NAME]
+  if history_frame then history_frame.destroy() end
+end
+
+---Selects a recipe and records it in recent history.
+---@param player LuaPlayer
+---@param recipe_name string|nil
+function gui.select_recipe(player, recipe_name)
+  if recipe_name and prototypes.recipe[recipe_name] then
+    state.record_recipe_history(player, recipe_name)
+  end
+  gui.show_recipe(player, recipe_name)
+  refresh_history(player)
+end
+
 -- ------------------------------------------------------------------------------
 
 ---Creates the calculator window for a player.
@@ -602,10 +712,10 @@ function gui.create_calculator(player)
   local old_frame = player.gui.screen[FRAME_NAME]
   if old_frame then old_frame.destroy() end
   local head_frame = player.gui.screen.add { type = "frame", name = FRAME_NAME, direction = "vertical" }
-  -- State settings
-  local state = player_calculator_state(player)
   -- GUI settings
-  local gui_settings = player_gui_settings(player)
+  local gui_settings = state.player_gui_settings(player)
+  -- State settings
+  local state = state.player_calculator_state(player)
   if state.window_location then
     head_frame.location = state.window_location
   else
@@ -619,6 +729,16 @@ function gui.create_calculator(player)
   local titlebar = head_frame.add { type = "flow", direction = "horizontal" }
   titlebar.drag_target = head_frame
   titlebar.style.horizontally_stretchable = true
+  -- History Toggle Button
+  titlebar.add {
+    type = "sprite-button",
+    name = HISTORY_TOGGLE_NAME,
+    sprite = "utility/forward_arrow", -- "utility/mod_last_updated"
+    style = "frame_action_button",
+    tooltip = state.history_visible
+        and { "ocs-launching-calculator.hide-history" }
+        or { "ocs-launching-calculator.show-history" },
+  }
   titlebar.add {
     type = "label",
     caption = { "ocs-launching-calculator.title" },
@@ -680,8 +800,8 @@ function gui.create_calculator(player)
     name = MANE_NAME .. "_silo_selection",
     direction = "horizontal",
   }
-  local silos = get_rocket_silos()
-  local silo_items, silo_index, selected_silo = prepare_selection(silos, state.selected_silo_name, vanilla_silo)
+  local silos = helpers.get_rocket_silos()
+  local silo_items, silo_index, selected_silo = helpers.prepare_selection(silos, state.selected_silo_name, vanilla_silo)
   if selected_silo then
     state.selected_silo_name = selected_silo.name
   end
@@ -717,8 +837,9 @@ function gui.create_calculator(player)
   }
   rocket_frame.style.width = gui_settings.column_width
   rocket_frame.add { type = "label", caption = { "ocs-launching-calculator.rocket-types" }, style = "heading_2_label" }
-  local rocket_recipes = get_rocket_recipes()
-  local r_items, recipe_index, selected_r_recipe = prepare_selection(rocket_recipes, state.selected_rocket_recipe_name,
+  local rocket_recipes = helpers.get_rocket_recipes()
+  local r_items, recipe_index, selected_r_recipe = helpers.prepare_selection(rocket_recipes,
+    state.selected_rocket_recipe_name,
     vanilla_r_part)
   if selected_r_recipe then
     state.selected_rocket_recipe_name = selected_r_recipe.name
@@ -886,6 +1007,7 @@ function gui.create_calculator(player)
   else
     gui.show_recipe(player, nil)
   end
+  gui.create_history(player)
 end
 
 -- ==============================================================================
@@ -904,4 +1026,3 @@ function gui.create_main_button(player)
 end
 
 return gui
-

@@ -6,6 +6,7 @@ local const = state.constants
 local MANE_NAME = const.mod_name
 local FRAME_NAME = const.frame_name
 local RECIPE_PICKER_NAME = const.recipe_picker_name
+local HISTORY_TOGGLE_NAME = const.mod_name .. "_history_toggle"
 local vanilla_silo = const.vanilla_silo
 local vanilla_r_part = const.vanilla_rocket_part
 
@@ -35,8 +36,7 @@ commands.add_command("ocs-launching-calculator-reset", "Reset your calculator st
 
   local player = game.get_player(command.player_index)
   if not player then return end
-  local frame = player.gui.screen[FRAME_NAME]
-  if frame and frame.valid then frame.destroy() end
+  gui.destroy_calculator(player)
   player.print({ "ocs-launching-calculator.storage-reset" })
 end)
 
@@ -53,8 +53,8 @@ script.on_event(defines.events.on_gui_closed, function(event)
   if not player then return end
 
   local element = event.element
-  if element and element.valid and element.name == FRAME_NAME then
-    element.destroy()
+  if element and element.valid and (element.name == FRAME_NAME or element.name == MANE_NAME .. "_history") then
+    gui.destroy_calculator(player)
   end
 end)
 
@@ -65,7 +65,7 @@ script.on_event("ocs-launching-calculator-toggle", function(event)
   if not player then return end
   local frame = player.gui.screen[FRAME_NAME]
   if frame and frame.valid then
-    frame.destroy()
+    gui.destroy_calculator(player)
   else
     gui.create_calculator(player)
   end
@@ -79,11 +79,11 @@ script.on_event(defines.events.on_gui_click, function(event)
   if not (element and element.valid) then return end
   if element.name == "ocs_launching_calculator_button" then -- interact
     local frame = player.gui.screen[FRAME_NAME]
-    if frame then frame.destroy() else gui.create_calculator(player) end
+    if frame then gui.destroy_calculator(player) else gui.create_calculator(player) end
     return
   elseif element.name == "ocs_launching_calculator_close" then -- MANE close
     local frame = player.gui.screen[FRAME_NAME]
-    if frame then frame.destroy() end
+    if frame then gui.destroy_calculator(player) end
     return
   elseif element.name == "ocs_launching_calculator_minimise" then -- MANE minimise
     local state = state.player_calculator_state(player)
@@ -102,6 +102,9 @@ script.on_event(defines.events.on_gui_click, function(event)
           or { "gui-crafting-queue.collapse" }
     end
     return
+  elseif element.name == HISTORY_TOGGLE_NAME then
+    gui.toggle_history(player, element)
+    return
   end
 
   -- clicking on icon selects "obvious" recipe
@@ -109,8 +112,12 @@ script.on_event(defines.events.on_gui_click, function(event)
   if tags.action == "select-recipe-for-product" then
     local recipe = calculation.find_unique_recipe_for_product(tags.item_name, tags.item_type)
     if recipe then
-      gui.show_recipe(player, recipe.name)
+      gui.select_recipe(player, recipe.name)
     end
+    return
+  end
+  if tags.action == "select-history-recipe" then
+    gui.select_recipe(player, tags.recipe_name)
     return
   end
 end)
@@ -125,6 +132,7 @@ script.on_event(defines.events.on_gui_location_changed, function(event)
   local player = game.get_player(event.player_index)
   local state = state.player_calculator_state(player)
   state.window_location = element.location
+  gui.update_history_position(player)
 end)
 
 ---Update the calculator when player changes the recipe picker
@@ -136,8 +144,7 @@ script.on_event(defines.events.on_gui_elem_changed, function(event)
   end
   local player = game.get_player(event.player_index)
   if not player then return end
-  state.player_calculator_state(player).selected_recipe = element.elem_value -- recipe name
-  gui.show_recipe(player, element.elem_value)
+  gui.select_recipe(player, element.elem_value)
 end)
 
 ---Handle changes to the selected silo or rocket recipe.

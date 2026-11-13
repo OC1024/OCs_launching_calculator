@@ -28,7 +28,7 @@ local function add_weight_tooltip(item)
   table.insert(item.custom_tooltip_fields, {
     name = TOOLTIP_NAME,
     value = get_weight_localised(item.weight),
-    order = 99,
+    order = 1,
     show_in_tooltip = true,
     show_in_factoriopedia = true,
   })
